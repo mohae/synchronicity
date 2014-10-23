@@ -5,6 +5,8 @@ A basic sync package for syncing two directories
 
 Synchronicity uses Michael T Jones' walk package to walk each directory and perform the appropriate action on each file. Synchronicity supports file suffix include and exclude filters, file prefix include and exclude filters. Time based filters will be added in the future.
 
+Synchronicity will examine files that exist in both the source and destination to see if they are different, if they aren't, the file will be copied. *This is not yet implemented*
+
 As support for operations get added, this will be updated. 
 
 `synchronicity.Synchro`'s lock structure is for updating the counters. Walk has its own lock structures to manage its concurrency.
