@@ -169,6 +169,11 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	return s.Message(), nil
 }
 
+// Pull is just a Push from dst to src
+func (s *Synchro) Pull(src, dst string) (string, error) {
+	return s.Push(dst, src)
+}
+
 func (s *Synchro) filepathWalkDst() error {
 	var fullpath string
 	visitor := func(p string, fi os.FileInfo, err error) error {
