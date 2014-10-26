@@ -4,17 +4,45 @@
 package synchronicity
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/MichaelTJones/walk"
 )
+
+const (
+	actionNone actionType = iota
+	actionNew
+	actionCopy
+	actionDelete
+	actionUpdate
+)
+
+type actionType int
+
+func (a actionType) String() string {
+	switch a {
+	case actionNone: 
+		return "duplicate"
+	case actionNew:
+		return "new"
+	case actionCopy:
+		return "copy"
+	case actionDelete:
+		return "delete"
+	case actionUpdate:
+		return "update properties"
+	}
+	return "unknown"
+}
 
 // Defaults for new Synchro objects.
 var Delete bool
@@ -51,18 +79,32 @@ func newCounter(n string) *counter {
 	return &counter{Name: n}
 }
 
-// Synchro provides information about a sync operation.
+func (c counter) String() string {
+	var buf bytes.Buffer
+	buf.WriteString(strconv.Itoa((int(c.Files))))
+	buf.WriteString(" files totalling ")
+	buf.WriteString(strconv.Itoa(int(c.Bytes)))
+	buf.WriteString(" bytes were ")
+	buf.WriteString(c.Name)
+	return buf.String()
+}
+
+// Synchro provides information about a sync operation. This trades memory for
+// CPU.
 type Synchro struct {
 	// This lock structure is not used for walk/file channel related things.
 	lock        sync.Mutex
 	UseFullpath bool
 	Delete      bool // mutually exclusive with synch
+	PreserveFileProp bool // Preserve file properties(uid, gid, mode)
 	// Filepaths to operate on
 	src         string
 	srcFull     string // the fullpath version of src
 	dst         string
 	dstFull     string // the dstFull version of dst
-	dstFileInfo map[string]fileInfo
+	// A map of all the fileInfos by path
+	dstFileData map[string]FileData
+	srcFileData map[string]FileData
 	// Sync operation modifiers
 	// TODO wire up support for attrubute overriding
 	Owner int
@@ -78,29 +120,28 @@ type Synchro struct {
 	IncludeExt      []string
 	IncludeExtCount int
 	IncludeAnchored string
-	// File time based filtering
+	// TODO File time based filtering
 	Newer      string
 	NewerMTime time.Time
 	NewerFile  string
 	// Output layout for time
 	OutputTimeLayout string
 	// Processing queues
-	copyCh chan string
+	copyCh chan FileData
 	delCh  chan string
+	updateCh chan FileData
 	// Other Counters
 	newCount  *counter
+	copyCount  *counter
 	delCount  *counter
-	modCount  *counter
+	updateCount  *counter
 	dupCount  *counter
 	skipCount *counter
 	t0        time.Time
 	𝛥t        float64
 }
 
-type fileInfo struct {
-	Processed bool
-	Fi        os.FileInfo
-}
+
 
 var unsetTime time.Time
 
@@ -108,15 +149,16 @@ var unsetTime time.Time
 // to a Synchro operation.
 func New() *Synchro {
 	return &Synchro{
-		dstFileInfo:      map[string]fileInfo{},
+		dstFileData:      map[string]FileData{},
 		Delete:           Delete,
 		ExcludeExt:       []string{},
 		IncludeExt:       []string{},
 		OutputTimeLayout: TimeLayout,
-		newCount:         newCounter("new"),
+		newCount:         newCounter("created"),
+		copyCount:        newCounter("copied"),
 		delCount:         newCounter("deleted"),
-		modCount:         newCounter("modified"),
-		dupCount:         newCounter("duplicate"),
+		updateCount:      newCounter("updated"),
+		dupCount:         newCounter("duplicates and not updated"),
 		skipCount:        newCounter("skipped"),
 	}
 }
@@ -130,8 +172,27 @@ func (s *Synchro) Delta() float64 {
 }
 
 func (s *Synchro) Message() string {
+	var msg bytes.Buffer
 	s.setDelta()
-	return fmt.Sprintf("%q was pushed to %q in %4f seconds\n%d new files were copied\n%d files were deleted\n%d files were updated\n%d files were skipped\n%d files were duplicates and not synched\n", s.src, s.dst, s.𝛥t, s.newCount.Files, s.delCount.Files, s.modCount.Files, s.skipCount.Files, s.dupCount.Files)
+	msg.WriteString(s.src)
+	msg.WriteString(" was pushed to ")
+	msg.WriteString(s.dst)
+	msg.WriteString(" in ")
+	msg.WriteString(strconv.FormatFloat(s.𝛥t,'f', 4, 64))
+	msg.WriteString(" seconds\n")
+	msg.WriteString(s.newCount.String())
+	msg.WriteString("\n")
+	msg.WriteString(s.copyCount.String())
+	msg.WriteString("\n")
+	msg.WriteString(s.updateCount.String())
+	msg.WriteString("\n")
+        msg.WriteString(s.dupCount.String())
+	msg.WriteString("\n")
+        msg.WriteString(s.delCount.String())
+	msg.WriteString("\n")
+	msg.WriteString(s.skipCount.String())
+	msg.WriteString("\n")
+	return msg.String()
 }
 
 // Push pushes the contents of src to dst.
@@ -166,6 +227,9 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	for k, value := range s.dstFileData {
+		logger.Debugf("%s\n%v\n",k, value.String())
+	}
 	return s.Message(), nil
 }
 
@@ -192,6 +256,7 @@ func (s *Synchro) filepathWalkDst() error {
 
 // addDstFile just adds the info about the destination file
 func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
+	logger.Debugf("addDstFile %s\n", p)
 	// We don't add directories, those are handled by their files.
 	if fi.IsDir() {
 		return nil
@@ -224,17 +289,28 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		s.addSkipStats(fi)
 		return nil
 	}
-	// Gotten this far, add it to dest list
+	// Gotten this far, hash it and add it to the dst list
+	fd := FileData{Hash: make([]byte,0,32), Fi: fi}
+	fd.Dir = filepath.Dir(relPath)
+	if fd.Dir == "." { // The dot is unnecessary for files without a parent dir
+		fd.Dir = ""
+	}
+	fd.SetHash(0)
+	logger.Debugf("fd.relPath: %s %x\n",fd.Dir, fd.Hash)
 	s.lock.Lock()
-	s.dstFileInfo[filepath.Join(s.dst, relPath)] = fileInfo{Fi: fi}
+	s.dstFileData[filepath.Join(s.dst, relPath)] = fd
 	s.lock.Unlock()
 	return nil
 }
 
+// procesSrc indexes the source directory, figures out what's new and what's
+// changed, and triggering the appropriate action. If an error is encountered,
+// it is returned.
 func (s *Synchro) processSrc() error {
 	// Push source to dest
-	s.copyCh = make(chan string)
+	s.copyCh = make(chan FileData)
 	s.delCh = make(chan string)
+	s.updateCh = make(chan FileData)
 	// Start the channel for copying
 	copyWait, err := s.copy()
 	if err != nil {
@@ -242,6 +318,11 @@ func (s *Synchro) processSrc() error {
 	}
 	// Start the channel for delete
 	delWait, err := s.delete()
+	if err != nil {
+		return err
+	}
+	// Start the channel for update
+	updateWait, err := s.update()
 	if err != nil {
 		return err
 	}
@@ -268,10 +349,13 @@ func (s *Synchro) processSrc() error {
 	copyWait.Wait()
 	close(s.delCh)
 	delWait.Wait()
+	close(s.updateCh)
+	updateWait.Wait()
 	return err
 }
 
-// addSrcFile just adds the info about the destination file
+// addSrcFile adds the info about the source file, then calls setAction to 
+// determine what action should be done, if any.
 func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	// We don't add directories, they are handled by the mkdir process
 	if fi.IsDir() {
@@ -300,23 +384,63 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		logger.Error(err)
 		return err
 	}
-	if relPath == "." {
+	if relPath == "." { // don't do current dir, this shouldn't occur
 		return nil
 	}
-	// determine if it should be copied
-	if s.shouldCopy(p, fi) {
-		tmpP := filepath.Join(s.dst, relPath)
-		inf, ok := s.dstFileInfo[tmpP]
-		if ok {
-			inf.Processed = true
-			s.dstFileInfo[tmpP] = inf
-			s.addModStats(fi)
-		} else {
-			s.addNewStats(fi)
-		}
-		s.copyCh <- relPath
+	if relPath == fi.Name() { // if we end up with the filename, use nothing
+		relPath = ""
+	} else {
+		// extract the directory
+		relPath = filepath.Dir(relPath)
 	}
+	logger.Infof("%s\n\t\t%s\n\t\t%s\n", root, p, relPath)
+	// determine if it should be copied
+	typ := s.setAction(relPath, fi)
+	logger.Debugf("Action = %s\n", typ.String())
+	switch typ {
+	case actionNew:
+		s.addNewStats(fi)
+	case actionCopy:
+		s.addCopyStats(fi)
+	case actionUpdate:
+		s.addUpdateStats(fi)
+	}
+	// otherwise its assumed to be actionNone
 	return nil
+}
+
+// setAction examines the src/dst to determine what should be done.
+// Possible action outcomes are:
+//    Do nothing (file contents and properties are the same)
+//    Update (file contents are the same, but properties are diff)
+//    Copy (file contents are different)
+//    New (new file)
+func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
+	logger.Debugf("setAction: %s %s\n", relPath, fi.Name())
+	newFd := FileData{Dir: relPath, Fi: fi}
+	// See if its not in the destination
+	fd, ok := s.dstFileData[filepath.Join(s.src, relPath)]
+	if !ok { 
+		logger.Debug("acton New: send to copyCh\n")
+		s.copyCh <- newFd
+		return actionNew
+	}
+	// copy if its not the same as dest
+	newFd.SetHash(0)
+	if bytes.Compare(newFd.Hash, fd.Hash) != 0 {
+		logger.Debug("acton Copy: send to copyCh\n")
+		s.copyCh <- newFd
+		return actionCopy
+	}
+	// update if the properties are different
+	if newFd.Fi.Mode() != fd.Fi.Mode() || newFd.Fi.ModTime() != fd.Fi.ModTime() {
+		logger.Debug("acton Update: send to updateCh\n")
+		s.updateCh <-newFd
+		return actionUpdate
+	}
+	// Otherwise everything is the same, its a duplicate: do nothing
+	logger.Debug("acton None: duplicate\n") 
+	return actionNone
 }
 
 func (s *Synchro) copy() (*sync.WaitGroup, error) {
@@ -325,19 +449,19 @@ func (s *Synchro) copy() (*sync.WaitGroup, error) {
 	go func() error {
 		defer wg.Done()
 		// process channel as we get items
-		for relPath := range s.copyCh {
+		for fd := range s.copyCh {
 			// make any directories that are missing from the path
-			err := s.mkDirTree(filepath.Dir(relPath))
+			err := s.mkDirTree(fd.Dir)
 			if err != nil {
 				return err
 			}
-			r, err := os.Open(filepath.Join(s.src, relPath))
+			r, err := os.Open(filepath.Join(s.src, fd.Dir, fd.Fi.Name()))
 			if err != nil {
 				logger.Debug(err)
 				return err
 			}
 			defer r.Close()
-			dst := filepath.Join(s.dst, relPath)
+			dst := filepath.Join(s.dst, fd.Dir, fd.Fi.Name())
 			var w *os.File
 			w, err = os.Create(dst)
 			if err != nil {
@@ -371,7 +495,25 @@ func (s *Synchro) delete() (*sync.WaitGroup, error) {
 		return nil
 	}()
 	return &wg, nil
+}
 
+// update updates the fi of a file: currently mode, mdate, and atime
+// this is done on files whose contents haven't changes (hashes are equal) but
+// their properties have.
+// TODO add support for uid, gid
+func (s *Synchro) update() (*sync.WaitGroup, error) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() error {
+		defer wg.Done()
+		for fd := range s.updateCh {
+			p := filepath.Join(s.dst, fd.Fi.Name())
+			os.Chmod(p, fd.Fi.Mode())
+			os.Chtimes(p,fd.Fi.ModTime(), fd.Fi.ModTime()) 
+		}
+		return nil
+	}()
+	return &wg, nil
 }
 
 func (s *Synchro) filterFileInfo(fi os.FileInfo) (bool, error) {
@@ -470,7 +612,7 @@ func (s *Synchro) excludeFile(root, p string) (bool, error) {
 //	return time.Now().Local().Format()
 //}
 
-func getFileParts(s string) (dir, file, ext string, err error) {
+func getFileParts(s string) (dir, file, ext string) {
 	// see if there is path involved, if there is, get the last part of it
 	dir, filename := filepath.Split(s)
 	parts := strings.Split(filename, ".")
@@ -479,21 +621,17 @@ func getFileParts(s string) (dir, file, ext string, err error) {
 	case 2:
 		file := parts[0]
 		ext := parts[1]
-		return dir, file, ext, nil
+		return dir, file, ext
 	case 1:
 		file := parts[0]
-		return dir, file, ext, nil
-	case 0:
-		err := fmt.Errorf("no destination filename found in %s", s)
-		return dir, file, ext, err
+		return dir, file, ext
 	default:
 		// join all but the last parts together with a "."
 		file := strings.Join(parts[0:l-1], ".")
 		ext := parts[l-1]
-		return dir, file, ext, nil
+		return dir, file, ext
 	}
-	err = fmt.Errorf("unable to determine destination filename and extension")
-	return dir, file, ext, err
+	return "", "", ""
 }
 
 // mkDirTree takes a directory path and makes sure it exists. If it doesn't
@@ -502,19 +640,16 @@ func getFileParts(s string) (dir, file, ext string, err error) {
 // This means we can encounter a child, or later descendent, before its
 // ancestor.
 //
-// All evaluation is done relative to the src and dst dirs, those are
-// considered the root and are expected to already exist.
 func (s *Synchro) mkDirTree(p string) error {
 	if p == "" {
 		return nil
 	}
-	_, isD, err := s.isDir(filepath.Join(s.dst, p))
-	if err != nil {
-		logger.Error(err)
-		return err
-	}
-	if isD { // if the parent already exists
-		return nil
+	fi, err := os.Stat(filepath.Join(s.dst, p))
+	if err == nil {
+		if fi.IsDir() { // if the parent already exists
+			return nil
+		}
+		return fmt.Errorf("mkdirTree: %s not a directory", filepath.Join(s.dst, p))
 	}
 	pieces := strings.Split(p, "/")
 	dstP := s.dst
@@ -532,35 +667,30 @@ func (s *Synchro) mkDirTree(p string) error {
 		if err == nil { // exists, move on
 			continue
 		}
-		st, err := os.Stat(srcP)
+		fi, err := os.Stat(srcP)
 		if err != nil {
 			logger.Debug(err)
 			return err
 		}
-		err = os.Mkdir(dstP, st.Mode())
+		err = os.Mkdir(dstP, fi.Mode())
 		if err != nil {
 			logger.Debug(err)
 			return err
 		}
-		// TODO mode, owner, group setting
+		err = os.Chtimes(dstP, fi.ModTime(), fi.ModTime())
+		if err != nil {
+			logger.Debug(err)
+			return err
+		}
+		// TODO owner, group setting
 	}
 	return nil
-}
-
-//func (s *Synchro)
-func (s *Synchro) shouldCopy(p string, fi os.FileInfo) bool {
-	// copy if its not in destination
-
-	// copy if its not the same as dest
-
-	//
-	return true
 }
 
 // deleteOrphans delete any files in the destination that were not in the
 // source. This only happens if a file wasn't processed
 func (s *Synchro) deleteOrphans() error {
-	for p, fi := range s.dstFileInfo {
+	for p, fi := range s.dstFileData {
 		if fi.Processed {
 			continue // processed files aren't orphaned
 		}
@@ -584,10 +714,17 @@ func (s *Synchro) addDelStats(fi os.FileInfo) {
 	s.lock.Unlock()
 }
 
-func (s *Synchro) addModStats(fi os.FileInfo) {
+func (s *Synchro) addCopyStats(fi os.FileInfo) {
 	s.lock.Lock()
-	s.modCount.Files++
-	s.modCount.Bytes += fi.Size()
+	s.copyCount.Files++
+	s.copyCount.Bytes += fi.Size()
+	s.lock.Unlock()
+}
+
+func (s *Synchro) addUpdateStats(fi os.FileInfo) {
+	s.lock.Lock()
+	s.updateCount.Files++
+	s.updateCount.Bytes += fi.Size()
 	s.lock.Unlock()
 }
 
@@ -605,17 +742,3 @@ func (s *Synchro) addSkipStats(fi os.FileInfo) {
 	s.lock.Unlock()
 }
 
-// checks to see if it is a directory, returns the info, truthiness, and error
-func (s *Synchro) isDir(p string) (fi os.FileInfo, dir bool, err error) {
-	fi, err = os.Stat(p)
-	if err != nil {
-		if err.Error() == fmt.Sprintf("stat %s: no such file or directory", p) {
-			return fi, false, nil
-		}
-		return fi, false, err
-	}
-	if fi.IsDir() {
-		return fi, true, nil
-	}
-	return fi, false, nil
-}
