@@ -20,10 +20,10 @@ import (
 
 const (
 	actionNone actionType = iota
-	actionNew
-	actionCopy
-	actionDelete
-	actionUpdate
+	actionNew	// creates new file in dst; doesn't exist in dst
+	actionCopy	// copy file from src to dst; contents are different.
+	actionDelete	// delete file from dst; doesn't exist in source
+	actionUpdate	// update file properties in dst; contents same but properties diff.
 )
 
 type actionType int
@@ -39,16 +39,21 @@ func (a actionType) String() string {
 	case actionDelete:
 		return "delete"
 	case actionUpdate:
-		return "update properties"
+		return "update"
 	}
 	return "unknown"
 }
 
 // Defaults for new Synchro objects.
-var Delete bool
-var TimeLayout string
-var cpuMultiplier int
-var maxProcs int
+
+// Whether or not orphaned files should be deleted. Orphaned files are files
+// that exist in the destination but not in the source.
+//
+// Sync() ignores this bool. 
+var Delete bool 
+var TimeLayout string // a valid time.Time layout string
+var cpuMultiplier int // 0 == 1, default == 2
+var maxProcs int // 0 == 1; default == runtime.NumCPU * cpuMultiplier
 var cpu int = runtime.NumCPU()
 
 func init() {
@@ -75,8 +80,8 @@ type counter struct {
 	Bytes int64
 }
 
-func newCounter(n string) *counter {
-	return &counter{Name: n}
+func newCounter(n string) counter {
+	return counter{Name: n}
 }
 
 func (c counter) String() string {
@@ -131,12 +136,12 @@ type Synchro struct {
 	delCh  chan string
 	updateCh chan FileData
 	// Other Counters
-	newCount  *counter
-	copyCount  *counter
-	delCount  *counter
-	updateCount  *counter
-	dupCount  *counter
-	skipCount *counter
+	newCount  counter
+	copyCount  counter
+	delCount  counter
+	updateCount  counter
+	dupCount  counter
+	skipCount counter
 	t0        time.Time
 	𝛥t        float64
 }
@@ -227,9 +232,6 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for k, value := range s.dstFileData {
-		logger.Debugf("%s\n%v\n",k, value.String())
-	}
 	return s.Message(), nil
 }
 
@@ -256,7 +258,7 @@ func (s *Synchro) filepathWalkDst() error {
 
 // addDstFile just adds the info about the destination file
 func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
-	logger.Debugf("addDstFile %s\n", p)
+	logger.Debugf("addDstFile\t%s\n\t\t\t\t\t%s\n", root, p)
 	// We don't add directories, those are handled by their files.
 	if fi.IsDir() {
 		return nil
@@ -290,15 +292,12 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return nil
 	}
 	// Gotten this far, hash it and add it to the dst list
-	fd := FileData{Hash: make([]byte,0,32), Fi: fi}
-	fd.Dir = filepath.Dir(relPath)
-	if fd.Dir == "." { // The dot is unnecessary for files without a parent dir
-		fd.Dir = ""
-	}
+	logger.Infof("relpath: %s\n", relPath)
+	fd := NewFileData(s.src, filepath.Dir(relPath), fi)
 	fd.SetHash()
-	logger.Debugf("fd.relPath: %s %x\n",fd.Dir, fd.Hash)
+	logger.Debugf("fd.dir: %s\tpath: %s\thash: %x\n",fd.Dir, fd.String(), fd.Hash)
 	s.lock.Lock()
-	s.dstFileData[relPath] = fd
+	s.dstFileData[fd.String()] = fd
 	s.lock.Unlock()
 	return nil
 }
@@ -357,6 +356,7 @@ func (s *Synchro) processSrc() error {
 // addSrcFile adds the info about the source file, then calls setAction to 
 // determine what action should be done, if any.
 func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
+	logger.Debugf("\nroot\t%s\npath\t%s\nname\t%s\n", root, p, fi.Name())
 	// We don't add directories, they are handled by the mkdir process
 	if fi.IsDir() {
 		return nil
@@ -392,8 +392,10 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	} else {
 		// extract the directory
 		relPath = filepath.Dir(relPath)
+		if relPath == "." {
+			relPath = ""
+		}
 	}
-	logger.Infof("%s\n\t\t%s\n\t\t%s\n", root, p, relPath)
 	// determine if it should be copied
 	typ := s.setAction(relPath, fi)
 	logger.Debugf("Action = %s\n", typ.String())
@@ -416,10 +418,11 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 //    Copy (file contents are different)
 //    New (new file)
 func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
-	logger.Debugf("setAction: %s %s\n", relPath, fi.Name())
-	newFd := FileData{HashType: useHashType, ChunkSize: 0, Dir: relPath, Fi: fi}
+	logger.Debugf("%s %s\n", relPath, fi.Name())
+	newFd := NewFileData(s.src, relPath, fi)
 	// See if its not in the destination
-	fd, ok := s.dstFileData[filepath.Join(s.dst, relPath)]
+	logger.Debugf("%s\n", newFd.String())
+	fd, ok := s.dstFileData[newFd.String()]
 	if !ok { 
 		logger.Debug("acton New: send to copyCh\n")
 		s.copyCh <- newFd

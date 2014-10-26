@@ -41,7 +41,7 @@ func TestFilePathWalkDst(t *testing.T) {
 	assert.Nil(t, err)
 	var i int
 	for p, fd := range s.dstFileData {
-		assert.Equal(t, filepath.Join(s.dst, expectedDir[i], expectedFile[i]), p)
+		assert.Equal(t, filepath.Join(expectedDir[i], expectedFile[i]), p)
 		assert.Equal(t, expectedDir[i], fd.Dir)
 		assert.Equal(t, expectedFile[i], fd.Fi.Name())
 		assert.Equal(t, expectedByte[i], fd.Fi.Size())
@@ -60,7 +60,7 @@ func TestFileAddDstFile(t *testing.T) {
 	assert.Nil(t, err)
 	err = s.addDstFile(s.dst, filepath.Join(s.dst, pdir, p), fi, err)
 	assert.Nil(t, err)
-	fd, ok := s.dstFileData[filepath.Join(s.dst, pdir, p)]
+	fd, ok := s.dstFileData[filepath.Join(pdir, p)]
 	assert.Equal(t, true, ok)
 	assert.Equal(t, "a/afile.txt", fd.String())
 }
@@ -142,7 +142,8 @@ func TestAddStats(t *testing.T) {
 	s.addCopyStats(fi)
 	assert.Equal(t, 1, s.copyCount.Files)
 	assert.Equal(t, 227, s.copyCount.Bytes)
-	s.addUpdateStats(1, s.updateCount.Files)
+	s.addUpdateStats(fi)
+	assert.Equal(t, 1, s.updateCount.Files)
 	assert.Equal(t, 227, s.updateCount.Bytes)
 	s.addDupStats(fi)
 	assert.Equal(t, 1, s.dupCount.Files)

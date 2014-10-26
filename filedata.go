@@ -51,13 +51,38 @@ type FileData struct {
 	Hash	[]byte
 	HashType hashType
 	ChunkSize int // The chunksize that this was created with.
+	MaxChunks int
 	CurByte int64 // for when the while file hasn't been hashed and 
+	Root string // the relative root of this file: allows for synch support
 	Dir string // relative path to parent directory of Fi
 	Fi        os.FileInfo
 }
 
+// Returns a FileData struct for the passed file using the defaults.
+// Set any overrides before performing an operation.
+func NewFileData(root, dir string, fi os.FileInfo) FileData {
+	if dir == "." {
+		dir = ""
+	}
+	return FileData{Hash: make([]byte, 0, 32), ChunkSize: ChunkSize, MaxChunks: MaxChunks, Dir: dir, Fi: fi}
+}
+
+// String is an alias to RelPath
 func (fd *FileData) String() string {
+	return fd.RelPath()
+}
+
+// RelPath returns the relative path of the file, this is the file less the
+// root information. This allows for easy comparision between two directories.
+func (fd *FileData) RelPath() string {
 	return filepath.Join(fd.Dir, fd.Fi.Name())
+}
+
+// RootPath returns the relative path of the file including its root. A root is
+// the directory that Synchronicity considers a root, e.g. one of the
+// directories being synched. This is not the FullPath of a file.
+func (fd *FileData) RootPath() string {
+	return filepath.Join(fd.Root, fd.Dir, fd.Fi.Name())
 }
 
 // SetHash computes the hash of the FileData. The path of the file is passed 
@@ -76,19 +101,13 @@ func (fd *FileData) SetHash() error {
 		return fmt.Errorf("%s hash type", fd.HashType.String())
 	}
 	if fd.ChunkSize == 0 {
-		return fd.hashFile(hasher)
+		return fd.hashFile(f, hasher)
 	}
-	return fd.chunkedHashFile(hasher)
+	return fd.chunkedHashFile(f, hasher)
 }
 
-func (fd *FileData) hashFile(hasher hash.Hash) error {
-	f, err := os.Open(fd.String())
-	if err != nil {
-		logger.Error(err)
-		return err
-	}
-	defer f.Close()
-	 _, err = io.Copy(hasher, f);
+func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
+	 _, err := io.Copy(hasher, f);
 	if err != nil {
 		logger.Error(err)
 		return err
@@ -97,10 +116,9 @@ func (fd *FileData) hashFile(hasher hash.Hash) error {
 	return nil
 }
 
-func (fd *FileData) chunkedHashFile(hasher hash.Hash) error {
-	f, err := os.Open(fd.String())
+func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) error {
 	reader := bufio.NewReaderSize(f, int(fd.ChunkSize))
-	_, err = io.CopyN(hasher, reader, int64(fd.ChunkSize))
+	_, err := io.CopyN(hasher, reader, int64(fd.ChunkSize))
 	if err != nil {
 		logger.Error(err)
 		return err
