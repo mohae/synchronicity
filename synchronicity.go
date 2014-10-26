@@ -295,10 +295,10 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	if fd.Dir == "." { // The dot is unnecessary for files without a parent dir
 		fd.Dir = ""
 	}
-	fd.SetHash(0)
+	fd.SetHash()
 	logger.Debugf("fd.relPath: %s %x\n",fd.Dir, fd.Hash)
 	s.lock.Lock()
-	s.dstFileData[filepath.Join(s.dst, relPath)] = fd
+	s.dstFileData[relPath] = fd
 	s.lock.Unlock()
 	return nil
 }
@@ -417,16 +417,16 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 //    New (new file)
 func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
 	logger.Debugf("setAction: %s %s\n", relPath, fi.Name())
-	newFd := FileData{Dir: relPath, Fi: fi}
+	newFd := FileData{HashType: useHashType, ChunkSize: 0, Dir: relPath, Fi: fi}
 	// See if its not in the destination
-	fd, ok := s.dstFileData[filepath.Join(s.src, relPath)]
+	fd, ok := s.dstFileData[filepath.Join(s.dst, relPath)]
 	if !ok { 
 		logger.Debug("acton New: send to copyCh\n")
 		s.copyCh <- newFd
 		return actionNew
 	}
 	// copy if its not the same as dest
-	newFd.SetHash(0)
+	newFd.SetHash()
 	if bytes.Compare(newFd.Hash, fd.Hash) != 0 {
 		logger.Debug("acton Copy: send to copyCh\n")
 		s.copyCh <- newFd
@@ -690,12 +690,12 @@ func (s *Synchro) mkDirTree(p string) error {
 // deleteOrphans delete any files in the destination that were not in the
 // source. This only happens if a file wasn't processed
 func (s *Synchro) deleteOrphans() error {
-	for p, fi := range s.dstFileData {
-		if fi.Processed {
+	for _, fd := range s.dstFileData {
+		if fd.Processed {
 			continue // processed files aren't orphaned
 		}
-		s.addDelStats(fi.Fi)
-		s.delCh <- p
+		s.addDelStats(fd.Fi)
+		s.delCh <- filepath.Join(s.dst, fd.String())
 	}
 	return nil
 }
