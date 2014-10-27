@@ -78,7 +78,6 @@ func (fd *FileData) String() string {
 func (fd *FileData) SetHash() error {
 	f, err := os.Open(fd.RootPath())
 	if err != nil {
-		logger.Errorf("%s\n", err.Error())
 		return err
 	}
 	defer f.Close()
@@ -96,7 +95,7 @@ func (fd *FileData) SetHash() error {
 }
 
 func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
-	n, err := io.Copy(hasher, f);
+	_, err := io.Copy(hasher, f);
 	if err != nil {
 		logger.Error(err)
 		return err
@@ -104,7 +103,6 @@ func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 	h := Hash256{}
 	copy(h[:], hasher.Sum(nil))
 	fd.Hashes = append(fd.Hashes, Hash256(h))
-	logger.Debugf("read bytes %d\t0: %x\n", n, fd.Hashes[0])
 	return nil
 }
 

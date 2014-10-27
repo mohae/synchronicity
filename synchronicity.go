@@ -258,7 +258,6 @@ func (s *Synchro) filepathWalkDst() error {
 
 // addDstFile just adds the info about the destination file
 func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
-	logger.Debugf("addDstFile\t%s\n\t\t\t\t\t%s\n", root, p)
 	// We don't add directories, those are handled by their files.
 	if fi.IsDir() {
 		return nil
@@ -292,12 +291,9 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return nil
 	}
 	// Gotten this far, hash it and add it to the dst list
-	logger.Infof("relpath: %s\n", relPath)
 	fd := NewFileData(s.src, filepath.Dir(relPath), fi)
-	logger.Errorf("Size of hash: %d\n", len(fd.Hashes))
 	fd.ChunkSize = 0
 	fd.SetHash()
-	logger.Debugf("fd.dir: %s\tpath: %s\thash: %%+v\n",fd.Dir, fd.String(), fd.Hashes)
 	s.lock.Lock()
 	s.dstFileData[fd.String()] = fd
 	s.lock.Unlock()
@@ -358,7 +354,6 @@ func (s *Synchro) processSrc() error {
 // addSrcFile adds the info about the source file, then calls setAction to 
 // determine what action should be done, if any.
 func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
-	logger.Debugf("\nroot\t%s\npath\t%s\nname\t%s\n", root, p, fi.Name())
 	// We don't add directories, they are handled by the mkdir process
 	if fi.IsDir() {
 		return nil
@@ -400,7 +395,6 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	}
 	// determine if it should be copied
 	typ := s.setAction(relPath, fi)
-	logger.Debugf("Action = %s\t%s\n", typ.String(), s.src)
 	switch typ {
 	case actionNew:
 		s.addNewStats(fi)
@@ -420,34 +414,30 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 //    Copy (file contents are different)
 //    New (new file)
 func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
-	logger.Debugf("%s %s\n", relPath, fi.Name())
 	newFd := NewFileData(s.src, relPath, fi)
-	logger.Debugf("%s\n%s\n%s\n%s\n%s\n", newFd.Root, newFd.Dir, newFd.Fi.Name(), newFd.RootPath(), newFd.String())
 	newFd.ChunkSize = 0
-	// See if its not in the destination
-	logger.Debugf("%s\n", newFd.String())
 	fd, ok := s.dstFileData[newFd.String()]
 	if !ok { 
-		logger.Debug("acton New: send to copyCh\n")
 		s.copyCh <- newFd
 		return actionNew
 	}
+	// See the processed flag on existing dest file, for delete processing,
+	// if applicable.
+	fd.Processed = true
+	s.dstFileData[newFd.String()] = fd
 	// copy if its not the same as dest
+	// TODO make own function to handle compares of hash slices
 	newFd.SetHash()
-	logger.Debugf("%x\n", newFd.Hashes[0])
 	if newFd.Hashes[0] != fd.Hashes[0] {
-		logger.Debug("acton Copy: send to copyCh\n")
 		s.copyCh <- newFd
 		return actionCopy
 	}
 	// update if the properties are different
 	if newFd.Fi.Mode() != fd.Fi.Mode() || newFd.Fi.ModTime() != fd.Fi.ModTime() {
-		logger.Debug("acton Update: send to updateCh\n")
 		s.updateCh <-newFd
 		return actionUpdate
 	}
 	// Otherwise everything is the same, its a duplicate: do nothing
-	logger.Debug("acton None: duplicate\n") 
 	return actionNone
 }
 
@@ -749,6 +739,3 @@ func (s *Synchro) addSkipStats(fi os.FileInfo) {
 	s.skipCount.Bytes += fi.Size()
 	s.lock.Unlock()
 }
-
-
-
