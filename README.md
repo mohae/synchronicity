@@ -8,7 +8,7 @@ Synchronicity uses Michael T Jones' walk package to concurrently walk each direc
 Synchronicity does support `push` and `pull`, which is just a `push` in reverse, with optional deletion of orphaned files in the destination. 
 
 ## Actions
-The destination directory is first indexed, with various properties tracked, and its checksum calculated.
+The destination directory is first indexed; the properties of each file encountered, along with its checksum, are indexed.
 
 The source directory is then walked. For each file encountered, the destination index is checked to see if it already exists. If it doese not exist, the `new` action is initiated for that file. If the file does exist, its checksum is compared to the destination file's checksum; a `copy` action is generated for each comparison that results in a difference. If the checksums are the same, the file properties, `mdate` and `mode`, are checked. If there are any differences in those properties, an `update` action is generated.
 
