@@ -30,8 +30,10 @@ The accurate method chunks the source file and compares each chunk to their dest
 
 Then again, this may be implemented differently...
 
-### Notes:
+## Notes:
 `synchronicity.Synchro`'s lock structure is for updating the counters. Walk has its own lock structures to manage its concurrency. Channels are used for the work queues.
+
+Seelog, `github.com/cihub/seelog` is used for logging. This is only for developmental purposes and will be removed.
 
 ## Status
 Experimental.
