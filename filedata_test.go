@@ -14,6 +14,6 @@ func TestSetHash(t *testing.T) {
 	fd := NewFileData("", ".", fi)
 	fd.ChunkSize = 0
 	err := fd.SetHash()
-	assert.NotNil(t, err)
-	assert.Equal(t, "", hex.EncodeToString(fd.Hash))
+	assert.Nil(t, err)
+	assert.Equal(t, "cf574d4ef67305ad4febe985ec92acc9ce5bc5aedeb11af09c323e41a78348cf", hex.EncodeToString(fd.Hashes[0][0:32]))
 }

@@ -294,8 +294,10 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	// Gotten this far, hash it and add it to the dst list
 	logger.Infof("relpath: %s\n", relPath)
 	fd := NewFileData(s.src, filepath.Dir(relPath), fi)
+	logger.Errorf("Size of hash: %d\n", len(fd.Hashes))
+	fd.ChunkSize = 0
 	fd.SetHash()
-	logger.Debugf("fd.dir: %s\tpath: %s\thash: %x\n",fd.Dir, fd.String(), fd.Hash)
+	logger.Debugf("fd.dir: %s\tpath: %s\thash: %%+v\n",fd.Dir, fd.String(), fd.Hashes)
 	s.lock.Lock()
 	s.dstFileData[fd.String()] = fd
 	s.lock.Unlock()
@@ -398,7 +400,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	}
 	// determine if it should be copied
 	typ := s.setAction(relPath, fi)
-	logger.Debugf("Action = %s\n", typ.String())
+	logger.Debugf("Action = %s\t%s\n", typ.String(), s.src)
 	switch typ {
 	case actionNew:
 		s.addNewStats(fi)
@@ -420,6 +422,8 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
 	logger.Debugf("%s %s\n", relPath, fi.Name())
 	newFd := NewFileData(s.src, relPath, fi)
+	logger.Debugf("%s\n%s\n%s\n%s\n%s\n", newFd.Root, newFd.Dir, newFd.Fi.Name(), newFd.RootPath(), newFd.String())
+	newFd.ChunkSize = 0
 	// See if its not in the destination
 	logger.Debugf("%s\n", newFd.String())
 	fd, ok := s.dstFileData[newFd.String()]
@@ -430,7 +434,8 @@ func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
 	}
 	// copy if its not the same as dest
 	newFd.SetHash()
-	if bytes.Compare(newFd.Hash, fd.Hash) != 0 {
+	logger.Debugf("%x\n", newFd.Hashes[0])
+	if newFd.Hashes[0] != fd.Hashes[0] {
 		logger.Debug("acton Copy: send to copyCh\n")
 		s.copyCh <- newFd
 		return actionCopy
@@ -744,4 +749,6 @@ func (s *Synchro) addSkipStats(fi os.FileInfo) {
 	s.skipCount.Bytes += fi.Size()
 	s.lock.Unlock()
 }
+
+
 

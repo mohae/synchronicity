@@ -30,7 +30,7 @@ type hashType int // Not really needed atm, but it'll be handy for adding other 
 var useHashType hashType
 
 // SHA256 sized for hashed blocks.
-type Hash [32]byte
+type Hash256 [32]byte
 
 func (h hashType) String() string {
 	switch h {
@@ -48,7 +48,7 @@ func init() {
 
 type FileData struct {
 	Processed bool
-	Hash	[]byte
+	Hashes	[]Hash256
 	HashType hashType
 	ChunkSize int // The chunksize that this was created with.
 	MaxChunks int
@@ -64,7 +64,8 @@ func NewFileData(root, dir string, fi os.FileInfo) FileData {
 	if dir == "." {
 		dir = ""
 	}
-	return FileData{Hash: make([]byte, 0, 32), ChunkSize: ChunkSize, MaxChunks: MaxChunks, Dir: dir, Fi: fi}
+	fd := FileData{HashType: useHashType, ChunkSize: ChunkSize, MaxChunks: MaxChunks, Root: root, Dir: dir, Fi: fi}
+	return fd
 }
 
 // String is an alias to RelPath
@@ -72,24 +73,12 @@ func (fd *FileData) String() string {
 	return fd.RelPath()
 }
 
-// RelPath returns the relative path of the file, this is the file less the
-// root information. This allows for easy comparision between two directories.
-func (fd *FileData) RelPath() string {
-	return filepath.Join(fd.Dir, fd.Fi.Name())
-}
-
-// RootPath returns the relative path of the file including its root. A root is
-// the directory that Synchronicity considers a root, e.g. one of the
-// directories being synched. This is not the FullPath of a file.
-func (fd *FileData) RootPath() string {
-	return filepath.Join(fd.Root, fd.Dir, fd.Fi.Name())
-}
-
 // SetHash computes the hash of the FileData. The path of the file is passed 
 // because FileData only knows it's name, not its location.
 func (fd *FileData) SetHash() error {
-	f, err := os.Open(fd.String())
+	f, err := os.Open(fd.RootPath())
 	if err != nil {
+		logger.Errorf("%s\n", err.Error())
 		return err
 	}
 	defer f.Close()
@@ -107,13 +96,29 @@ func (fd *FileData) SetHash() error {
 }
 
 func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
-	 _, err := io.Copy(hasher, f);
+	n, err := io.Copy(hasher, f);
 	if err != nil {
 		logger.Error(err)
 		return err
 	}
-	copy(fd.Hash, hasher.Sum(nil))
+	h := Hash256{}
+	copy(h[:], hasher.Sum(nil))
+	fd.Hashes = append(fd.Hashes, Hash256(h))
+	logger.Debugf("read bytes %d\t0: %x\n", n, fd.Hashes[0])
 	return nil
+}
+
+// RelPath returns the relative path of the file, this is the file less the
+// root information. This allows for easy comparision between two directories.
+func (fd *FileData) RelPath() string {
+	return filepath.Join(fd.Dir, fd.Fi.Name())
+}
+
+// RootPath returns the relative path of the file including its root. A root is
+// the directory that Synchronicity considers a root, e.g. one of the
+// directories being synched. This is not the FullPath of a file.
+func (fd *FileData) RootPath() string {
+	return filepath.Join(fd.Root, fd.Dir, fd.Fi.Name())
 }
 
 func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) error {
@@ -123,8 +128,10 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) error {
 		logger.Error(err)
 		return err
 	}
-	copy(fd.Hash, hasher.Sum(nil))
-	logger.Debugf("%s\n%x\n", fd.String(), fd.Hash)
+	h := Hash256{}
+	copy(h[:], hasher.Sum(nil))
+	fd.Hashes = append(fd.Hashes, Hash256(h))
+	logger.Debugf("chunked hash %s\n%x\n", fd.String(), fd.Hashes[0])
 	return nil
 }
 
