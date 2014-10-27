@@ -8,7 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-
 func TestSetHash(t *testing.T) {
 	fi, _ := os.Stat("LICENSE")
 	fd := NewFileData("", ".", fi)

@@ -19,18 +19,18 @@ import (
 )
 
 const (
-	actionNone actionType = iota
-	actionNew	// creates new file in dst; doesn't exist in dst
-	actionCopy	// copy file from src to dst; contents are different.
-	actionDelete	// delete file from dst; doesn't exist in source
-	actionUpdate	// update file properties in dst; contents same but properties diff.
+	actionNone   actionType = iota
+	actionNew               // creates new file in dst; doesn't exist in dst
+	actionCopy              // copy file from src to dst; contents are different.
+	actionDelete            // delete file from dst; doesn't exist in source
+	actionUpdate            // update file properties in dst; contents same but properties diff.
 )
 
 type actionType int
 
 func (a actionType) String() string {
 	switch a {
-	case actionNone: 
+	case actionNone:
 		return "duplicate"
 	case actionNew:
 		return "new"
@@ -49,11 +49,11 @@ func (a actionType) String() string {
 // Whether or not orphaned files should be deleted. Orphaned files are files
 // that exist in the destination but not in the source.
 //
-// Sync() ignores this bool. 
-var Delete bool 
+// Sync() ignores this bool.
+var Delete bool
 var TimeLayout string // a valid time.Time layout string
 var cpuMultiplier int // 0 == 1, default == 2
-var maxProcs int // 0 == 1; default == runtime.NumCPU * cpuMultiplier
+var maxProcs int      // 0 == 1; default == runtime.NumCPU * cpuMultiplier
 var cpu int = runtime.NumCPU()
 
 func init() {
@@ -98,15 +98,15 @@ func (c counter) String() string {
 // CPU.
 type Synchro struct {
 	// This lock structure is not used for walk/file channel related things.
-	lock        sync.Mutex
-	UseFullpath bool
-	Delete      bool // mutually exclusive with synch
+	lock             sync.Mutex
+	UseFullpath      bool
+	Delete           bool // mutually exclusive with synch
 	PreserveFileProp bool // Preserve file properties(uid, gid, mode)
 	// Filepaths to operate on
-	src         string
-	srcFull     string // the fullpath version of src
-	dst         string
-	dstFull     string // the dstFull version of dst
+	src     string
+	srcFull string // the fullpath version of src
+	dst     string
+	dstFull string // the dstFull version of dst
 	// A map of all the fileInfos by path
 	dstFileData map[string]FileData
 	srcFileData map[string]FileData
@@ -132,21 +132,19 @@ type Synchro struct {
 	// Output layout for time
 	OutputTimeLayout string
 	// Processing queues
-	copyCh chan FileData
-	delCh  chan string
+	copyCh   chan FileData
+	delCh    chan string
 	updateCh chan FileData
 	// Other Counters
-	newCount  counter
-	copyCount  counter
-	delCount  counter
-	updateCount  counter
-	dupCount  counter
-	skipCount counter
-	t0        time.Time
-	𝛥t        float64
+	newCount    counter
+	copyCount   counter
+	delCount    counter
+	updateCount counter
+	dupCount    counter
+	skipCount   counter
+	t0          time.Time
+	𝛥t          float64
 }
-
-
 
 var unsetTime time.Time
 
@@ -183,7 +181,7 @@ func (s *Synchro) Message() string {
 	msg.WriteString(" was pushed to ")
 	msg.WriteString(s.dst)
 	msg.WriteString(" in ")
-	msg.WriteString(strconv.FormatFloat(s.𝛥t,'f', 4, 64))
+	msg.WriteString(strconv.FormatFloat(s.𝛥t, 'f', 4, 64))
 	msg.WriteString(" seconds\n")
 	msg.WriteString(s.newCount.String())
 	msg.WriteString("\n")
@@ -191,9 +189,9 @@ func (s *Synchro) Message() string {
 	msg.WriteString("\n")
 	msg.WriteString(s.updateCount.String())
 	msg.WriteString("\n")
-        msg.WriteString(s.dupCount.String())
+	msg.WriteString(s.dupCount.String())
 	msg.WriteString("\n")
-        msg.WriteString(s.delCount.String())
+	msg.WriteString(s.delCount.String())
 	msg.WriteString("\n")
 	msg.WriteString(s.skipCount.String())
 	msg.WriteString("\n")
@@ -351,7 +349,7 @@ func (s *Synchro) processSrc() error {
 	return err
 }
 
-// addSrcFile adds the info about the source file, then calls setAction to 
+// addSrcFile adds the info about the source file, then calls setAction to
 // determine what action should be done, if any.
 func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	// We don't add directories, they are handled by the mkdir process
@@ -417,7 +415,7 @@ func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
 	newFd := NewFileData(s.src, relPath, fi)
 	newFd.ChunkSize = 0
 	fd, ok := s.dstFileData[newFd.String()]
-	if !ok { 
+	if !ok {
 		s.copyCh <- newFd
 		return actionNew
 	}
@@ -434,7 +432,7 @@ func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
 	}
 	// update if the properties are different
 	if newFd.Fi.Mode() != fd.Fi.Mode() || newFd.Fi.ModTime() != fd.Fi.ModTime() {
-		s.updateCh <-newFd
+		s.updateCh <- newFd
 		return actionUpdate
 	}
 	// Otherwise everything is the same, its a duplicate: do nothing
@@ -507,7 +505,7 @@ func (s *Synchro) update() (*sync.WaitGroup, error) {
 		for fd := range s.updateCh {
 			p := filepath.Join(s.dst, fd.Fi.Name())
 			os.Chmod(p, fd.Fi.Mode())
-			os.Chtimes(p,fd.Fi.ModTime(), fd.Fi.ModTime()) 
+			os.Chtimes(p, fd.Fi.ModTime(), fd.Fi.ModTime())
 		}
 		return nil
 	}()

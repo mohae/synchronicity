@@ -15,17 +15,18 @@ import (
 	"strings"
 )
 
-// This allows for up to 128k of read data. If the file is larger than that, 
+// This allows for up to 128k of read data. If the file is larger than that,
 // a different approach should be done, i.e. don't precompute the hash and use
-// other rules for determining difference. 
+// other rules for determining difference.
 //
-var MaxChunks = 16   // Modify directly to change buffered hashes
-var ChunkSize = 8*1024 // use 8k chunks
+var MaxChunks = 16       // Modify directly to change buffered hashes
+var ChunkSize = 8 * 1024 // use 8k chunks
 
 const (
 	invalid hashType = iota
 	SHA256
 )
+
 type hashType int // Not really needed atm, but it'll be handy for adding other types.
 var useHashType hashType
 
@@ -48,13 +49,13 @@ func init() {
 
 type FileData struct {
 	Processed bool
-	Hashes	[]Hash256
-	HashType hashType
+	Hashes    []Hash256
+	HashType  hashType
 	ChunkSize int // The chunksize that this was created with.
 	MaxChunks int
-	CurByte int64 // for when the while file hasn't been hashed and 
-	Root string // the relative root of this file: allows for synch support
-	Dir string // relative path to parent directory of Fi
+	CurByte   int64  // for when the while file hasn't been hashed and
+	Root      string // the relative root of this file: allows for synch support
+	Dir       string // relative path to parent directory of Fi
 	Fi        os.FileInfo
 }
 
@@ -73,7 +74,7 @@ func (fd *FileData) String() string {
 	return fd.RelPath()
 }
 
-// SetHash computes the hash of the FileData. The path of the file is passed 
+// SetHash computes the hash of the FileData. The path of the file is passed
 // because FileData only knows it's name, not its location.
 func (fd *FileData) SetHash() error {
 	f, err := os.Open(fd.RootPath())
@@ -95,7 +96,7 @@ func (fd *FileData) SetHash() error {
 }
 
 func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
-	_, err := io.Copy(hasher, f);
+	_, err := io.Copy(hasher, f)
 	if err != nil {
 		logger.Error(err)
 		return err
