@@ -182,7 +182,7 @@ func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
 }
 
 func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd FileData) (bool, error) {
-	equal, err := fd.isEqualCached(chunks, f, hasher, dstFd)
+	equal, err := fd.isEqualCached(dstFd.MaxChunks, f, hasher, dstFd)
 	if err != nil {
 		return equal, err
 	}
