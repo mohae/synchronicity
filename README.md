@@ -14,26 +14,36 @@ The source directory is then walked. For each file encountered, the destination 
 
 If `delete` is enabled, any orphaned files in the destination are deleted. An orphaned file is a file that exists in the destination but does not exist in the source.
 
+## File Comparison
+Files that exist in both the source and the destination are examined to see if the source should be copied to the destination or if the destination's properties should be updated.
+
+For change detection, files are checked for size equality. If they are different sizes, the source is copied to the destination. If the file sizes are the same, the files contents are compare for equality. This is done by reading chunks of bytes, 8KB by default, and comparing their digests. If their digests are different, the source is copied to the destination.
+
+If both files are the same, their file properties are checked for changes. If there has been a change in `mtime` or `mode`, the destination file's properties are updated with the source's.
+
+### Full file
+If the chunkSize is  set to 0, the full entire contents of the file will be read and hashed. This can lead to high memory consumption.
+
+### Chunked
+If the chunkSize is set to a non-zero value, the contents of the files will be read using the chunkSize as the number of bytes to read. ChunkSize is always a multiple of 1k, 1024 bytes.
+
+When inventorying destination files, their hashes will be calculated too. When chunked reading is used, each chunk generates its own hash, which is appended to FileData.Hashes. Reading continues until MaxChunks have been read or EOF has been reached. If the file size is larger thank chunkSize * MaxChunks, the rest of the file will be handled by the mixed procssing.
+
+### Mixed
+For larger files, mixed processing is used for file comparison. The mixed evaluation will first behave the same as the chunked evaluation with the cached destination hashes. Once MaxChunks has been processed, the destination file will be opened for reading, and the files will be compared starting with the byte after the last chunk read.
+
+This provides rudimentary support for large files, allowing for detection of changes before the entire file has been processed, if a change has occurred, while limiting the amount of RAM used to pre-calculate file digests.
+ 
 ### Experimental support
 Synchronicity has experimental support for file filtering using `include` and `exclude` filters. Include filters only looks at files that match the `include` filters. Exclude filters excludes any files that match the `exclude` filters. These filters can be applied to either file suffixes or as prefixes to filenames.
 
 ### Future Functionality
-Support for filtering on time.
-
-Chunked hash comparison and calculation. Currently, synchronicity hashes the entire file contents, which can be memory unfriendly. Chunking is one way to handle this. When chunking is enabled, synchronicity will read up to *n* chunks of a file, or until EOF, whichever comes first.
-
-This means that files larger than `Synchro.ChunkSize * Syncrho.MaxChunks` need to be checked for content equality using an additional strategy. The strategy used will be determined by the tradeoff desired between speed and accurracy.
-
-The fastest method for evaluation of large files will be to compare properties and size for equality along with the pre-calculated checksums. If any of these are different, the files will not be considered equal. This method may lead to false positives because it will not detect files that have been modified beyond the already calculated bits that are also the same size as the original and have their properties set to be the same.
-
-The accurate method chunks the source file and compares each chunk to their destination counterpart. Once all of the destination's pre-calculated hashes have been consumed, synchronicity will continue reading the destination file, in chunks, starting at the next byte afte the last byte read by the hash calculation process during the building of the destination file list.
-
-Then again, this may be implemented differently...
+* Support for filtering on time.
+* Adaptive chunking of large files.
+* Writing directory inventory and information to file or other persistent store.
 
 ## Notes:
 `synchronicity.Synchro`'s lock structure is for updating the counters. Walk has its own lock structures to manage its concurrency. Channels are used for the work queues.
-
-Seelog, `github.com/cihub/seelog` is used for logging. This is only for developmental purposes and will be removed.
 
 ## Status
 Experimental.
