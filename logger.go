@@ -1,54 +1,32 @@
-// This logger code is based on Seelog's 'Writing libraries with Seelog'
-// example: https://github.com/cihub/seelog/wiki/Writing-libraries-with-Seelog
-//
-// No copyright claims are made and no warranty, express or implied, is made
-// on this code by the Authors of the 'rollie' rollie package for Go.
-// Please refer to Cloud Instruments Co., Ltd. or the above link for any
-// additional information.
-
 package synchronicity
 
 import (
-	"errors"
-	seelog "github.com/cihub/seelog"
 	"io"
+	"io/ioutil"
+	"log"
 )
-
-var logger seelog.LoggerInterface
+// Whether to use verbose output or not.
+// Errors and higher use "log", which may or may not be discarded.
+var Verbose bool
 
 func init() {
-	// Disable logger by default.
-	DisableLog()
+	log.SetOutput(ioutil.Discard)
 }
 
-// DisableLog disables all library log output.
-func DisableLog() {
-	logger = seelog.Disabled
+func SetLogger(l io.Writer) {
+	log.SetOutput(l)
 }
 
-// UseLogger uses a specified seelog.LoggerInterface to output library log.
-// Use this func if you are using Seelog logging system in your app.
-func UseLogger(newLogger seelog.LoggerInterface) {
-	logger = newLogger
-}
-
-// SetLogWriter uses a specified io.Writer to output library log.
-// Use this func if you are not using Seelog logging system in your app.
-func SetLogWriter(writer io.Writer) error {
-	if writer == nil {
-		return errors.New("Nil writer")
+// Use for verbose output. Anything using Log() is for Verbosity.
+func Log(v ...interface{}) {
+	if Verbose {
+		log.Print(v...)
 	}
-
-	newLogger, err := seelog.LoggerFromWriterWithMinLevel(writer, seelog.TraceLvl)
-	if err != nil {
-		return err
-	}
-
-	UseLogger(newLogger)
-	return nil
 }
 
-// Call this before app shutdown
-func FlushLog() {
-	logger.Flush()
+// Use for verbose output. Anything using Logf() is for Verbosity.
+func Logf(format string, v ...interface{}) {
+	if Verbose {
+		log.Printf(format, v...)
+	}
 }

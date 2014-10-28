@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -205,6 +206,8 @@ func (s *Synchro) Message() string {
 //    * Files in destination not in source are deleted.
 func (s *Synchro) Push(src, dst string) (string, error) {
 	s.t0 = time.Now()
+	fmt.Printf("Start push of %q to %q\n", src, dst)
+	Logf("Start push of %q to %q\n", src, dst)
 	// check to see if something was passed
 	if src == "" {
 		return "", fmt.Errorf("source not set")
@@ -215,7 +218,7 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	// Check for existence of src
 	_, err := os.Stat(src)
 	if err != nil {
-		logger.Error(err)
+		log.Printf("%s\n", err)
 		return "", err
 	}
 	// TODO check that destination is writable instead of relying on a later error
@@ -281,7 +284,7 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	var relPath string
 	relPath, err = filepath.Rel(root, p)
 	if err != nil {
-		logger.Error(err)
+		log.Printf("%s\n", err)
 		return err
 	}
 	if relPath == "." {
@@ -290,7 +293,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	}
 	// Gotten this far, hash it and add it to the dst list
 	fd := NewFileData(s.src, filepath.Dir(relPath), fi)
-	fd.ChunkSize = 0
 	fd.SetHash()
 	s.lock.Lock()
 	s.dstFileData[fd.String()] = fd
@@ -336,7 +338,7 @@ func (s *Synchro) processSrc() error {
 	if s.Delete {
 		err = s.deleteOrphans()
 		if err != nil {
-			logger.Error(err)
+			log.Printf("%s\n", err)
 			return err
 		}
 	}
@@ -376,7 +378,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	var relPath string
 	relPath, err = filepath.Rel(root, p)
 	if err != nil {
-		logger.Error(err)
+		log.Printf("%s\n", err)
 		return err
 	}
 	if relPath == "." { // don't do current dir, this shouldn't occur
@@ -392,7 +394,10 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		}
 	}
 	// determine if it should be copied
-	typ := s.setAction(relPath, fi)
+	typ, err := s.setAction(relPath, fi)
+	if err != nil {
+		return err
+	}
 	switch typ {
 	case actionNew:
 		s.addNewStats(fi)
@@ -411,32 +416,33 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 //    Update (file contents are the same, but properties are diff)
 //    Copy (file contents are different)
 //    New (new file)
-func (s *Synchro) setAction(relPath string, fi os.FileInfo) actionType {
+func (s *Synchro) setAction(relPath string, fi os.FileInfo) (actionType, error) {
 	newFd := NewFileData(s.src, relPath, fi)
-	newFd.ChunkSize = 0
 	fd, ok := s.dstFileData[newFd.String()]
 	if !ok {
 		s.copyCh <- newFd
-		return actionNew
+		return actionNew, nil
 	}
 	// See the processed flag on existing dest file, for delete processing,
 	// if applicable.
 	fd.Processed = true
 	s.dstFileData[newFd.String()] = fd
 	// copy if its not the same as dest
-	// TODO make own function to handle compares of hash slices
-	newFd.SetHash()
-	if newFd.Hashes[0] != fd.Hashes[0] {
+	𝛥, err := newFd.isEqual(fd)
+	if err != nil {
+		return actionNone, err
+	}
+	if 𝛥 {
 		s.copyCh <- newFd
-		return actionCopy
+		return actionCopy, nil
 	}
 	// update if the properties are different
 	if newFd.Fi.Mode() != fd.Fi.Mode() || newFd.Fi.ModTime() != fd.Fi.ModTime() {
 		s.updateCh <- newFd
-		return actionUpdate
+		return actionUpdate, nil
 	}
 	// Otherwise everything is the same, its a duplicate: do nothing
-	return actionNone
+	return actionNone, nil
 }
 
 func (s *Synchro) copy() (*sync.WaitGroup, error) {
@@ -449,11 +455,12 @@ func (s *Synchro) copy() (*sync.WaitGroup, error) {
 			// make any directories that are missing from the path
 			err := s.mkDirTree(fd.Dir)
 			if err != nil {
+				log.Printf("%s\n", err)
 				return err
 			}
 			r, err := os.Open(filepath.Join(s.src, fd.Dir, fd.Fi.Name()))
 			if err != nil {
-				logger.Debug(err)
+				log.Printf("%s\n", err)
 				return err
 			}
 			defer r.Close()
@@ -461,13 +468,13 @@ func (s *Synchro) copy() (*sync.WaitGroup, error) {
 			var w *os.File
 			w, err = os.Create(dst)
 			if err != nil {
-				logger.Debug(err)
+				log.Printf("%s\n", err)
 				return err
 			}
 			defer w.Close()
 			_, err = io.Copy(w, r)
 			if err != nil {
-				logger.Error(err)
+				log.Printf("%s\n", err)
 				return err
 			}
 		}
@@ -484,7 +491,7 @@ func (s *Synchro) delete() (*sync.WaitGroup, error) {
 		for fname := range s.delCh {
 			err := os.Remove(fname)
 			if err != nil {
-				logger.Error(err)
+				log.Printf("%s\n", err)
 				return err
 			}
 		}
@@ -558,6 +565,7 @@ func (s *Synchro) includeFile(root, p string) (bool, error) {
 	if s.Include != "" {
 		matches, err := filepath.Match(s.Include, filepath.Join(root, p))
 		if err != nil {
+			log.Printf("%s\n", err)
 			return false, err
 		}
 
@@ -645,7 +653,9 @@ func (s *Synchro) mkDirTree(p string) error {
 		if fi.IsDir() { // if the parent already exists
 			return nil
 		}
-		return fmt.Errorf("mkdirTree: %s not a directory", filepath.Join(s.dst, p))
+		err := fmt.Errorf("mkdirTree: %s not a directory", filepath.Join(s.dst, p))
+		log.Printf("%s\n", err)
+		return err
 	}
 	pieces := strings.Split(p, "/")
 	dstP := s.dst
@@ -665,17 +675,17 @@ func (s *Synchro) mkDirTree(p string) error {
 		}
 		fi, err := os.Stat(srcP)
 		if err != nil {
-			logger.Debug(err)
+			log.Printf("%s\n", err)
 			return err
 		}
 		err = os.Mkdir(dstP, fi.Mode())
 		if err != nil {
-			logger.Debug(err)
+			log.Printf("%s\n", err)
 			return err
 		}
 		err = os.Chtimes(dstP, fi.ModTime(), fi.ModTime())
 		if err != nil {
-			logger.Debug(err)
+			log.Printf("%s\n", err)
 			return err
 		}
 		// TODO owner, group setting

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"hash"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +21,16 @@ import (
 // other rules for determining difference.
 //
 var MaxChunks = 16       // Modify directly to change buffered hashes
-var ChunkSize = 8 * 1024 // use 8k chunks
+var chunkSize = int64(8 * 1024) // use 8k chunks as default
+
+// SetChunkSize sets the chunkSize as 1k * i, i.e. 8 == 8k chunkSize
+// If the multiplier, i, is <= 0, the default is used, 8.
+func SetChunkSize(i int) {
+	if i <= 0 {
+		i = 8
+	}
+	chunkSize = int64(1024 * i)
+}
 
 const (
 	invalid hashType = iota
@@ -51,7 +61,7 @@ type FileData struct {
 	Processed bool
 	Hashes    []Hash256
 	HashType  hashType
-	ChunkSize int // The chunksize that this was created with.
+	ChunkSize int64 // The chunksize that this was created with.
 	MaxChunks int
 	CurByte   int64  // for when the while file hasn't been hashed and
 	Root      string // the relative root of this file: allows for synch support
@@ -65,7 +75,7 @@ func NewFileData(root, dir string, fi os.FileInfo) FileData {
 	if dir == "." {
 		dir = ""
 	}
-	fd := FileData{HashType: useHashType, ChunkSize: ChunkSize, MaxChunks: MaxChunks, Root: root, Dir: dir, Fi: fi}
+	fd := FileData{HashType: useHashType, ChunkSize: chunkSize, MaxChunks: MaxChunks, Root: root, Dir: dir, Fi: fi}
 	return fd
 }
 
@@ -77,17 +87,9 @@ func (fd *FileData) String() string {
 // SetHash computes the hash of the FileData. The path of the file is passed
 // because FileData only knows it's name, not its location.
 func (fd *FileData) SetHash() error {
-	f, err := os.Open(fd.RootPath())
+	f, hasher, err := fd.getFileHasher()
 	if err != nil {
 		return err
-	}
-	defer f.Close()
-	var hasher hash.Hash
-	switch fd.HashType {
-	case SHA256:
-		hasher = sha256.New() //
-	default:
-		return fmt.Errorf("%s hash type", fd.HashType.String())
 	}
 	if fd.ChunkSize == 0 {
 		return fd.hashFile(f, hasher)
@@ -95,16 +97,149 @@ func (fd *FileData) SetHash() error {
 	return fd.chunkedHashFile(f, hasher)
 }
 
+// getHasher returns a file and the hasher to use it on. If error, return that.
+func (fd *FileData) getFileHasher() (f *os.File, hasher hash.Hash, err error) {
+	f, err = os.Open(fd.RootPath())
+	if err != nil {
+		return 
+	}
+	hasher, err = fd.getHasher()
+	return
+}
+
+// getHasher returns a hasher or an error
+func (fd *FileData) getHasher() (hasher hash.Hash, err error) {
+	switch fd.HashType {
+	case SHA256:
+		hasher = sha256.New() //
+	default:
+		err = fmt.Errorf("%s hash type", fd.HashType.String())
+		return
+	}
+	return
+}
+
+// hashFile hashes the entire file.
 func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 	_, err := io.Copy(hasher, f)
 	if err != nil {
-		logger.Error(err)
+		log.Printf("%s/n", err)
 		return err
 	}
 	h := Hash256{}
 	copy(h[:], hasher.Sum(nil))
 	fd.Hashes = append(fd.Hashes, Hash256(h))
 	return nil
+}
+
+// chunkedHashFile reads up to max chunks, or the entire file, whichever comes
+// first. 
+func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
+	reader := bufio.NewReaderSize(f, int(fd.ChunkSize))
+	var cnt int
+	var bytes int64
+	h := Hash256{}
+	for cnt = 0; cnt < MaxChunks; cnt++ { // read until EOF || MaxChunks
+		n, err := io.CopyN(hasher, reader, int64(fd.ChunkSize))
+		if err != nil && err != io.EOF {
+			return err
+		}
+		bytes += n
+		copy(h[:], hasher.Sum(nil))
+		fd.Hashes = append(fd.Hashes, Hash256(h))		
+	}
+	if err != nil {
+		log.Printf("%s\n", err)
+		return err
+	}
+	_ = cnt
+	return nil
+}
+
+// isEqual compares the current file with the passed file and returns 
+// whether or not they are equal. If the file length is greater than our
+// checksum buffer, the rest of the file is read in chunks, until EOF or
+// a difference is found, whichever comes first.
+//
+// If they are of different lengths, we assume they are different
+func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
+	if fd.Fi.Size() != dstFd.Fi.Size() {
+		return false, nil
+	}
+	// otherwise, examine the file contents
+	f, hasher, err := fd.getFileHasher()
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	// TODO support adaptive
+	chunks := int(fd.Fi.Size()/int64(fd.ChunkSize) + 1)
+	if chunks > len(fd.Hashes) {
+		return fd.isEqualMixed(chunks, f, hasher, dstFd)
+	}
+
+	return fd.isEqualCached(chunks, f, hasher, dstFd)
+}
+
+func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd FileData) (bool, error) {
+	equal, err := fd.isEqualCached(chunks, f, hasher, dstFd)
+	if err != nil {
+		return equal, err
+	}
+	if !equal {
+		return equal, nil
+	}
+	// Otherwise check the file from the current point
+	dstF, err := os.Open(dstFd.RootPath())
+	
+	// Go to the last read byte
+	pos, err := dstF.Seek(dstFd.CurByte, 0)
+	if err != nil {
+		return false, err
+	}	
+	_ = pos
+	dstHasher, err := fd.getHasher()
+	if err != nil {
+		return false, err
+	}
+	dH := Hash256{}
+	sH := Hash256{}
+	// Check until EOF or a difference is found
+	for {
+		s, err := io.CopyN(hasher, f, fd.ChunkSize)
+		if err != nil {
+			return false, err
+		}
+		d, err := io.CopyN(dstHasher, dstF, fd.ChunkSize)
+		if err != nil {
+			return false, err
+		}
+		if d != s { // if the bytes copied were different, return false
+			return false, nil
+		}
+		copy(dH[:], dstHasher.Sum(nil))
+		copy(sH[:], hasher.Sum(nil)) 
+		if Hash256(dH) != Hash256(sH) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// isEqualCached is called when the file fits within the maxChunks. 
+func (fd *FileData) isEqualCached(chunks int, f *os.File, hasher hash.Hash, dstFd FileData) (bool, error) {
+	h := Hash256{}
+	for i := 0; i < chunks; i++ {
+		_, err := io.CopyN(hasher, f, fd.ChunkSize)
+		if err != nil {
+			return false, err
+		}
+		copy(h[:], hasher.Sum(nil))
+		if Hash256(h) != dstFd.Hashes[i] {
+			return false, nil
+		}	
+	}
+	return true, nil
 }
 
 // RelPath returns the relative path of the file, this is the file less the
@@ -120,20 +255,6 @@ func (fd *FileData) RootPath() string {
 	return filepath.Join(fd.Root, fd.Dir, fd.Fi.Name())
 }
 
-func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) error {
-	reader := bufio.NewReaderSize(f, int(fd.ChunkSize))
-	_, err := io.CopyN(hasher, reader, int64(fd.ChunkSize))
-	if err != nil {
-		logger.Error(err)
-		return err
-	}
-	h := Hash256{}
-	copy(h[:], hasher.Sum(nil))
-	fd.Hashes = append(fd.Hashes, Hash256(h))
-	logger.Debugf("chunked hash %s\n%x\n", fd.String(), fd.Hashes[0])
-	return nil
-}
-
 func SetHashType(s string) {
 	useHashType = ParseHashType(s)
 }
@@ -146,3 +267,5 @@ func ParseHashType(s string) hashType {
 	}
 	return invalid
 }
+
+
