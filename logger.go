@@ -5,6 +5,7 @@ import (
 	"io/ioutil"
 	"log"
 )
+
 // Whether to use verbose output or not.
 // Errors and higher use "log", which may or may not be discarded.
 var Verbose bool

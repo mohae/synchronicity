@@ -187,7 +187,7 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 		if err != nil {
 			return equal, err
 		}
-			if !equal {
+		if !equal {
 			return equal, nil
 		}
 	}

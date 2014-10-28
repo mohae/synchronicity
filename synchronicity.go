@@ -105,11 +105,11 @@ func (c counter) String() string {
 // Synchro provides information about a sync operation. This trades memory for
 // CPU.
 type Synchro struct {
-	maxProcs int      // maxProcs for this synchro.
+	maxProcs int // maxProcs for this synchro.
 	// This lock structure is not used for walk/file channel related things.
-	lock             sync.Mutex
-	PrecomputeHash   bool
-	delete           bool // mutually exclusive with synch
+	lock               sync.Mutex
+	PrecomputeHash     bool
+	delete             bool // mutually exclusive with synch
 	PreserveProperties bool // Preserve file properties(uid, gid, mode)
 	// Filepaths to operate on
 	src     string
@@ -161,19 +161,19 @@ var unsetTime time.Time
 // to a Synchro operation.
 func New() *Synchro {
 	return &Synchro{
-		maxProcs: maxProcs,
-		dstFileData:      map[string]FileData{},
-		delete:           true,
+		maxProcs:           maxProcs,
+		dstFileData:        map[string]FileData{},
+		delete:             true,
 		PreserveProperties: true,
-		ExcludeExt:       []string{},
-		IncludeExt:       []string{},
-		OutputTimeLayout: TimeLayout,
-		newCount:         newCounter("created"),
-		copyCount:        newCounter("copied"),
-		delCount:         newCounter("deleted"),
-		updateCount:      newCounter("updated"),
-		dupCount:         newCounter("duplicates and not updated"),
-		skipCount:        newCounter("skipped"),
+		ExcludeExt:         []string{},
+		IncludeExt:         []string{},
+		OutputTimeLayout:   TimeLayout,
+		newCount:           newCounter("created"),
+		copyCount:          newCounter("copied"),
+		delCount:           newCounter("deleted"),
+		updateCount:        newCounter("updated"),
+		dupCount:           newCounter("duplicates and not updated"),
+		skipCount:          newCounter("skipped"),
 	}
 }
 
@@ -291,7 +291,6 @@ func (s *Synchro) Pull(src, dst string) (string, error) {
 func Pull(src, dst string) (string, error) {
 	return mainSynchro.Pull(src, dst)
 }
-
 
 func (s *Synchro) filepathWalkDst() error {
 	var fullpath string
@@ -779,4 +778,3 @@ func (s *Synchro) addSkipStats(fi os.FileInfo) {
 	s.skipCount.Bytes += fi.Size()
 	s.lock.Unlock()
 }
-
