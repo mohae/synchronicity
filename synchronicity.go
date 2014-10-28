@@ -46,18 +46,11 @@ func (a actionType) String() string {
 }
 
 // Defaults for new Synchro objects.
-
-// Whether or not orphaned files should be deleted. Orphaned files are files
-// that exist in the destination but not in the source.
-//
-// Sync() ignores this bool.
-var TimeLayout string // a valid time.Time layout string
 var maxProcs int
 var cpuMultiplier int // 0 == 1, default == 2
 var cpu int = runtime.NumCPU()
 
 func init() {
-	TimeLayout = "2006-01-02:15:04:05MST"
 	mainSynchro = New()
 }
 
@@ -123,7 +116,7 @@ type Synchro struct {
 	// TODO wire up support for attrubute overriding
 	Owner int
 	Group int
-	Mode  os.FileMode
+	Mod   int64
 	// Exclude file processing
 	Exclude         string
 	ExcludeExt      []string
@@ -134,12 +127,10 @@ type Synchro struct {
 	IncludeExt      []string
 	IncludeExtCount int
 	IncludeAnchored string
-	// TODO File time based filtering
+	// time based filtering
 	Newer      string
 	NewerMTime time.Time
 	NewerFile  string
-	// Output layout for time
-	OutputTimeLayout string
 	// Processing queues
 	copyCh   chan FileData
 	delCh    chan string
@@ -151,6 +142,7 @@ type Synchro struct {
 	updateCount counter
 	dupCount    counter
 	skipCount   counter
+	// timer
 	t0          time.Time
 	𝛥t          float64
 }
@@ -177,26 +169,36 @@ func New() *Synchro {
 	}
 }
 
+// SetDelete sets if orphaned files should be deleted.
 func (s *Synchro) SetDelete(b bool) {
 	s.delete = b
 }
 
+// SetDelete sets if orphaned files should be deleted.
 func SetDelete(b bool) {
 	mainSynchro.SetDelete(b)
 }
 
+// DstFileData returns the map of FileData accumulated during the walk of the
+// destination.
 func (s *Synchro) DstFileData() map[string]FileData {
 	return s.dstFileData
 }
 
+// DstFileData returns the map of FileData accumulated during the walk of the
+// destination.
 func DstFileData() map[string]FileData {
 	return mainSynchro.DstFileData()
 }
 
+// SrcFileData returns the map of FileData accumulated during the walk of the
+// source.
 func (s *Synchro) SrcFileData() map[string]FileData {
 	return s.srcFileData
 }
 
+// SrcFileData returns the map of FileData accumulated during the walk of the
+// source.
 func SrcFileData() map[string]FileData {
 	return mainSynchro.srcFileData
 }
@@ -205,10 +207,12 @@ func (s *Synchro) setDelta() {
 	s.𝛥t = float64(time.Since(s.t0)) / 1e9
 }
 
+// Delta returns the 𝛥 between the start and end of an operation/
 func (s *Synchro) Delta() float64 {
 	return s.𝛥t
 }
 
+// Delta returns the 𝛥 between the start and end of an operation/
 func Delta() float64 {
 	return mainSynchro.Delta()
 }
@@ -238,6 +242,7 @@ func (s *Synchro) Message() string {
 	return msg.String()
 }
 
+// Message returns stats about the last Synch.
 func Message() string {
 	return mainSynchro.Message()
 }
@@ -246,7 +251,7 @@ func Message() string {
 //    * Existing files that are the same are ignored
 //    * Modified files are overwritten, even if dst is newer
 //    * New files are created.
-//    * Files in destination not in source are deleted.
+//    * Files in destination not in source may be deleted.
 func (s *Synchro) Push(src, dst string) (string, error) {
 	s.t0 = time.Now()
 	fmt.Printf("Start push of %q to %q\n", src, dst)
@@ -279,6 +284,11 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	return s.Message(), nil
 }
 
+// Push pushes the contents of src to dst.
+//    * Existing files that are the same are ignored
+//    * Modified files are overwritten, even if dst is newer
+//    * New files are created.
+//    * Files in destination not in source may be deleted.
 func Push(src, dst string) (string, error) {
 	return mainSynchro.Push(src, dst)
 }
@@ -288,6 +298,7 @@ func (s *Synchro) Pull(src, dst string) (string, error) {
 	return s.Push(dst, src)
 }
 
+// Pull is just a Push from dst to src
 func Pull(src, dst string) (string, error) {
 	return mainSynchro.Pull(src, dst)
 }
@@ -451,6 +462,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	if err != nil {
 		return err
 	}
+	// Add stats to the appropriate accumulater.
 	switch typ {
 	case actionNew:
 		s.addNewStats(fi)
@@ -498,6 +510,12 @@ func (s *Synchro) setAction(relPath string, fi os.FileInfo) (actionType, error) 
 	return actionNone, nil
 }
 
+// copyFile copies the file.
+// TODO should a copy of the file be made in a tmp directory while its hash
+// is being computed, or in memory. Source would not need to be read and 
+// processed twice this way. If a copy operation is to occur, the tmp file
+// gets renamed to the destination, otherwise the tmp directory is cleaned up
+// at the end of the run.
 func (s *Synchro) copyFile() (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -536,6 +554,7 @@ func (s *Synchro) copyFile() (*sync.WaitGroup, error) {
 	return &wg, nil
 }
 
+// deleteFile deletes any file for which it receives.
 func (s *Synchro) deleteFile() (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -572,6 +591,7 @@ func (s *Synchro) updateFile() (*sync.WaitGroup, error) {
 	return &wg, nil
 }
 
+// See if the file should be filtered
 func (s *Synchro) filterFileInfo(fi os.FileInfo) (bool, error) {
 	// Don't add symlinks, otherwise would have to code some cycle
 	// detection amongst other stuff.
@@ -665,15 +685,11 @@ func (s *Synchro) excludeFile(root, p string) (bool, error) {
 	return false, nil
 }
 
-//func formattedNow() string {
-//	return time.Now().Local().Format()
-//}
-
 // mkDirTree takes a directory path and makes sure it exists. If it doesn't
 // exist it will create it, this includes any parent directories that don't
 // already exist. This is needed because we process requests as we get them.
 // This means we can encounter a child, or later descendent, before its
-// ancestor.
+// ancestor. We also want to preserve as many properties as we can.
 //
 func (s *Synchro) mkDirTree(p string) error {
 	if p == "" {

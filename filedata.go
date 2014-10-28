@@ -38,7 +38,7 @@ const (
 )
 
 type hashType int // Not really needed atm, but it'll be handy for adding other types.
-var useHashType hashType
+var useHashType hashType // The hash type to use to create the digest
 
 // SHA256 sized for hashed blocks.
 type Hash256 [32]byte
@@ -59,7 +59,7 @@ func init() {
 
 type FileData struct {
 	Processed bool
-	Hashes    []Hash256
+	Digests    []Hash256
 	HashType  hashType
 	ChunkSize int64 // The chunksize that this was created with.
 	MaxChunks int
@@ -181,6 +181,12 @@ func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
 	return fd.isEqualCached(chunks, f, hasher, dstFd)
 }
 
+// isEqualMixed is used when the file size is larger than the amount of bytes
+// we can precalculate, 128k by default. First the precalculated digests are 
+// used, then the original destination file is read and the pointer moved to
+// the last read byte by the precalculation routine, until a difference is
+// found or an EOF is encountered.
+//
 func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd FileData) (bool, error) {
 	if len(dstFd.Hashes) > 0 {
 		equal, err := fd.isEqualCached(dstFd.MaxChunks, f, hasher, dstFd)
@@ -260,10 +266,12 @@ func (fd *FileData) RootPath() string {
 	return filepath.Join(fd.Root, fd.Dir, fd.Fi.Name())
 }
 
+// SetHashType sets the hashtype to use based on the passed value. 
 func SetHashType(s string) {
 	useHashType = ParseHashType(s)
 }
 
+// ParseHashType returns the hashType for a given string.
 func ParseHashType(s string) hashType {
 	s = strings.ToLower(s)
 	switch s {
