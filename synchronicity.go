@@ -163,7 +163,7 @@ func New() *Synchro {
 	return &Synchro{
 		maxProcs: maxProcs,
 		dstFileData:      map[string]FileData{},
-		Delete:           true,
+		delete:           true,
 		PreserveProperties: true,
 		ExcludeExt:       []string{},
 		IncludeExt:       []string{},
@@ -177,12 +177,12 @@ func New() *Synchro {
 	}
 }
 
-func (s *Synchro) Delete(b bool) {
+func (s *Synchro) SetDelete(b bool) {
 	s.delete = b
 }
 
-func Delete(b bool) {
-	mainSynchro.Delete(b)
+func SetDelete(b bool) {
+	mainSynchro.SetDelete(b)
 }
 
 func (s *Synchro) DstFileData() map[string]FileData {
@@ -363,17 +363,17 @@ func (s *Synchro) processSrc() error {
 	s.delCh = make(chan string)
 	s.updateCh = make(chan FileData)
 	// Start the channel for copying
-	copyWait, err := s.copy()
+	copyWait, err := s.copyFile()
 	if err != nil {
 		return err
 	}
 	// Start the channel for delete
-	delWait, err := s.delete()
+	delWait, err := s.deleteFile()
 	if err != nil {
 		return err
 	}
 	// Start the channel for update
-	updateWait, err := s.update()
+	updateWait, err := s.updateFile()
 	if err != nil {
 		return err
 	}
@@ -389,7 +389,7 @@ func (s *Synchro) processSrc() error {
 		return err
 	}
 	err = walk.Walk(fullpath, visitor)
-	if s.Delete {
+	if s.delete {
 		err = s.deleteOrphans()
 		if err != nil {
 			log.Printf("%s\n", err)
@@ -499,7 +499,7 @@ func (s *Synchro) setAction(relPath string, fi os.FileInfo) (actionType, error) 
 	return actionNone, nil
 }
 
-func (s *Synchro) copy() (*sync.WaitGroup, error) {
+func (s *Synchro) copyFile() (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() error {
@@ -537,7 +537,7 @@ func (s *Synchro) copy() (*sync.WaitGroup, error) {
 	return &wg, nil
 }
 
-func (s *Synchro) delete() (*sync.WaitGroup, error) {
+func (s *Synchro) deleteFile() (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() error {
@@ -558,7 +558,7 @@ func (s *Synchro) delete() (*sync.WaitGroup, error) {
 // this is done on files whose contents haven't changes (hashes are equal) but
 // their properties have.
 // TODO add support for uid, gid
-func (s *Synchro) update() (*sync.WaitGroup, error) {
+func (s *Synchro) updateFile() (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() error {
