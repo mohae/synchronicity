@@ -51,28 +51,35 @@ func (a actionType) String() string {
 // that exist in the destination but not in the source.
 //
 // Sync() ignores this bool.
-var Delete bool
 var TimeLayout string // a valid time.Time layout string
+var maxProcs int
 var cpuMultiplier int // 0 == 1, default == 2
-var maxProcs int      // 0 == 1; default == runtime.NumCPU * cpuMultiplier
 var cpu int = runtime.NumCPU()
 
 func init() {
 	TimeLayout = "2006-01-02:15:04:05MST"
-	SetCPUMultiplier(2)
+	mainSynchro = New()
+}
 
+var mainSynchro *Synchro
+
+// SetMaxProcs sets the maxProcs to the passed value, or 1 for <= 0.
+func (s *Synchro) SetMaxProcs(i int) {
+	if i <= 0 {
+		s.maxProcs = 1
+	} else {
+		s.maxProcs = cpu * i
+	}
 }
 
 // SetCPUMultiplier sets both the multipler and the maxProcs.
-// If the multiplier is <= 0, 0 is used
+// If the multiplier is <= 0, 1 is used
 func SetCPUMultiplier(i int) {
-	if cpuMultiplier <= 0 {
-		cpuMultiplier = 1
-		maxProcs = cpu
-	} else {
-		cpuMultiplier = i
-		maxProcs = cpu * i
+	if i <= 0 {
+		i = 1
 	}
+	cpuMultiplier = i
+	maxProcs = cpu * cpuMultiplier
 }
 
 type counter struct {
@@ -98,11 +105,12 @@ func (c counter) String() string {
 // Synchro provides information about a sync operation. This trades memory for
 // CPU.
 type Synchro struct {
+	maxProcs int      // maxProcs for this synchro.
 	// This lock structure is not used for walk/file channel related things.
 	lock             sync.Mutex
-	UseFullpath      bool
-	Delete           bool // mutually exclusive with synch
-	PreserveFileProp bool // Preserve file properties(uid, gid, mode)
+	PrecomputeHash   bool
+	delete           bool // mutually exclusive with synch
+	PreserveProperties bool // Preserve file properties(uid, gid, mode)
 	// Filepaths to operate on
 	src     string
 	srcFull string // the fullpath version of src
@@ -153,8 +161,10 @@ var unsetTime time.Time
 // to a Synchro operation.
 func New() *Synchro {
 	return &Synchro{
+		maxProcs: maxProcs,
 		dstFileData:      map[string]FileData{},
-		Delete:           Delete,
+		Delete:           true,
+		PreserveProperties: true,
 		ExcludeExt:       []string{},
 		IncludeExt:       []string{},
 		OutputTimeLayout: TimeLayout,
@@ -167,6 +177,30 @@ func New() *Synchro {
 	}
 }
 
+func (s *Synchro) Delete(b bool) {
+	s.delete = b
+}
+
+func Delete(b bool) {
+	mainSynchro.Delete(b)
+}
+
+func (s *Synchro) DstFileData() map[string]FileData {
+	return s.dstFileData
+}
+
+func DstFileData() map[string]FileData {
+	return mainSynchro.DstFileData()
+}
+
+func (s *Synchro) SrcFileData() map[string]FileData {
+	return s.srcFileData
+}
+
+func SrcFileData() map[string]FileData {
+	return mainSynchro.srcFileData
+}
+
 func (s *Synchro) setDelta() {
 	s.𝛥t = float64(time.Since(s.t0)) / 1e9
 }
@@ -175,6 +209,11 @@ func (s *Synchro) Delta() float64 {
 	return s.𝛥t
 }
 
+func Delta() float64 {
+	return mainSynchro.Delta()
+}
+
+// Message returns stats about the last Synch.
 func (s *Synchro) Message() string {
 	var msg bytes.Buffer
 	s.setDelta()
@@ -197,6 +236,10 @@ func (s *Synchro) Message() string {
 	msg.WriteString(s.skipCount.String())
 	msg.WriteString("\n")
 	return msg.String()
+}
+
+func Message() string {
+	return mainSynchro.Message()
 }
 
 // Push pushes the contents of src to dst.
@@ -236,10 +279,19 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	return s.Message(), nil
 }
 
+func Push(src, dst string) (string, error) {
+	return mainSynchro.Push(src, dst)
+}
+
 // Pull is just a Push from dst to src
 func (s *Synchro) Pull(src, dst string) (string, error) {
 	return s.Push(dst, src)
 }
+
+func Pull(src, dst string) (string, error) {
+	return mainSynchro.Pull(src, dst)
+}
+
 
 func (s *Synchro) filepathWalkDst() error {
 	var fullpath string
@@ -293,7 +345,9 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	}
 	// Gotten this far, hash it and add it to the dst list
 	fd := NewFileData(s.src, filepath.Dir(relPath), fi)
-	fd.SetHash()
+	if s.PrecomputeHash {
+		fd.SetHash()
+	}
 	s.lock.Lock()
 	s.dstFileData[fd.String()] = fd
 	s.lock.Unlock()
@@ -342,12 +396,12 @@ func (s *Synchro) processSrc() error {
 			return err
 		}
 	}
-	close(s.copyCh)
-	copyWait.Wait()
-	close(s.delCh)
-	delWait.Wait()
 	close(s.updateCh)
 	updateWait.Wait()
+	close(s.delCh)
+	delWait.Wait()
+	close(s.copyCh)
+	copyWait.Wait()
 	return err
 }
 
@@ -616,28 +670,6 @@ func (s *Synchro) excludeFile(root, p string) (bool, error) {
 //	return time.Now().Local().Format()
 //}
 
-func getFileParts(s string) (dir, file, ext string) {
-	// see if there is path involved, if there is, get the last part of it
-	dir, filename := filepath.Split(s)
-	parts := strings.Split(filename, ".")
-	l := len(parts)
-	switch l {
-	case 2:
-		file := parts[0]
-		ext := parts[1]
-		return dir, file, ext
-	case 1:
-		file := parts[0]
-		return dir, file, ext
-	default:
-		// join all but the last parts together with a "."
-		file := strings.Join(parts[0:l-1], ".")
-		ext := parts[l-1]
-		return dir, file, ext
-	}
-	return "", "", ""
-}
-
 // mkDirTree takes a directory path and makes sure it exists. If it doesn't
 // exist it will create it, this includes any parent directories that don't
 // already exist. This is needed because we process requests as we get them.
@@ -747,3 +779,4 @@ func (s *Synchro) addSkipStats(fi os.FileInfo) {
 	s.skipCount.Bytes += fi.Size()
 	s.lock.Unlock()
 }
+

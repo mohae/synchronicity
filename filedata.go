@@ -20,7 +20,7 @@ import (
 // a different approach should be done, i.e. don't precompute the hash and use
 // other rules for determining difference.
 //
-var MaxChunks = 16       // Modify directly to change buffered hashes
+var MaxChunks = 16              // Modify directly to change buffered hashes
 var chunkSize = int64(8 * 1024) // use 8k chunks as default
 
 // SetChunkSize sets the chunkSize as 1k * i, i.e. 8 == 8k chunkSize
@@ -101,7 +101,7 @@ func (fd *FileData) SetHash() error {
 func (fd *FileData) getFileHasher() (f *os.File, hasher hash.Hash, err error) {
 	f, err = os.Open(fd.RootPath())
 	if err != nil {
-		return 
+		return
 	}
 	hasher, err = fd.getHasher()
 	return
@@ -133,7 +133,7 @@ func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 }
 
 // chunkedHashFile reads up to max chunks, or the entire file, whichever comes
-// first. 
+// first.
 func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 	reader := bufio.NewReaderSize(f, int(fd.ChunkSize))
 	var cnt int
@@ -146,7 +146,7 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 		}
 		bytes += n
 		copy(h[:], hasher.Sum(nil))
-		fd.Hashes = append(fd.Hashes, Hash256(h))		
+		fd.Hashes = append(fd.Hashes, Hash256(h))
 	}
 	if err != nil {
 		log.Printf("%s\n", err)
@@ -156,7 +156,7 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 	return nil
 }
 
-// isEqual compares the current file with the passed file and returns 
+// isEqual compares the current file with the passed file and returns
 // whether or not they are equal. If the file length is greater than our
 // checksum buffer, the rest of the file is read in chunks, until EOF or
 // a difference is found, whichever comes first.
@@ -182,21 +182,26 @@ func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
 }
 
 func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd FileData) (bool, error) {
-	equal, err := fd.isEqualCached(dstFd.MaxChunks, f, hasher, dstFd)
-	if err != nil {
-		return equal, err
-	}
-	if !equal {
-		return equal, nil
+	if len(dstFd.Hashes) > 0 {
+		equal, err := fd.isEqualCached(dstFd.MaxChunks, f, hasher, dstFd)
+		if err != nil {
+			return equal, err
+		}
+			if !equal {
+			return equal, nil
+		}
 	}
 	// Otherwise check the file from the current point
 	dstF, err := os.Open(dstFd.RootPath())
-	
+
 	// Go to the last read byte
-	pos, err := dstF.Seek(dstFd.CurByte, 0)
-	if err != nil {
-		return false, err
-	}	
+	var pos int64
+	if dstFd.CurByte > 0 {
+		pos, err = dstF.Seek(dstFd.CurByte, 0)
+		if err != nil {
+			return false, err
+		}
+	}
 	_ = pos
 	dstHasher, err := fd.getHasher()
 	if err != nil {
@@ -218,7 +223,7 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 			return false, nil
 		}
 		copy(dH[:], dstHasher.Sum(nil))
-		copy(sH[:], hasher.Sum(nil)) 
+		copy(sH[:], hasher.Sum(nil))
 		if Hash256(dH) != Hash256(sH) {
 			return false, nil
 		}
@@ -226,7 +231,7 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 	return true, nil
 }
 
-// isEqualCached is called when the file fits within the maxChunks. 
+// isEqualCached is called when the file fits within the maxChunks.
 func (fd *FileData) isEqualCached(chunks int, f *os.File, hasher hash.Hash, dstFd FileData) (bool, error) {
 	h := Hash256{}
 	for i := 0; i < chunks; i++ {
@@ -237,7 +242,7 @@ func (fd *FileData) isEqualCached(chunks int, f *os.File, hasher hash.Hash, dstF
 		copy(h[:], hasher.Sum(nil))
 		if Hash256(h) != dstFd.Hashes[i] {
 			return false, nil
-		}	
+		}
 	}
 	return true, nil
 }
@@ -268,4 +273,26 @@ func ParseHashType(s string) hashType {
 	return invalid
 }
 
-
+// getFileParts splits the passed string into directory, filename, and file
+// extension, or as many of those parts that exist.
+func getFileParts(s string) (dir, file, ext string) {
+	// see if there is path involved, if there is, get the last part of it
+	dir, filename := filepath.Split(s)
+	parts := strings.Split(filename, ".")
+	l := len(parts)
+	switch l {
+	case 2:
+		file := parts[0]
+		ext := parts[1]
+		return dir, file, ext
+	case 1:
+		file := parts[0]
+		return dir, file, ext
+	default:
+		// join all but the last parts together with a "."
+		file := strings.Join(parts[0:l-1], ".")
+		ext := parts[l-1]
+		return dir, file, ext
+	}
+	return "", "", ""
+}
