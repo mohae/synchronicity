@@ -102,7 +102,7 @@ type Synchro struct {
 	// This lock structure is not used for walk/file channel related things.
 	lock               sync.Mutex
 	PrecomputeHash     bool
-	delete             bool // mutually exclusive with synch
+	Delete             bool // mutually exclusive with synch
 	PreserveProperties bool // Preserve file properties(uid, gid, mode)
 	// Filepaths to operate on
 	src     string
@@ -143,8 +143,8 @@ type Synchro struct {
 	dupCount    counter
 	skipCount   counter
 	// timer
-	t0          time.Time
-	𝛥t          float64
+	t0 time.Time
+	𝛥t float64
 }
 
 var unsetTime time.Time
@@ -155,11 +155,10 @@ func New() *Synchro {
 	return &Synchro{
 		maxProcs:           maxProcs,
 		dstFileData:        map[string]FileData{},
-		delete:             true,
+		Delete:             true,
 		PreserveProperties: true,
 		ExcludeExt:         []string{},
 		IncludeExt:         []string{},
-		OutputTimeLayout:   TimeLayout,
 		newCount:           newCounter("created"),
 		copyCount:          newCounter("copied"),
 		delCount:           newCounter("deleted"),
@@ -167,16 +166,6 @@ func New() *Synchro {
 		dupCount:           newCounter("duplicates and not updated"),
 		skipCount:          newCounter("skipped"),
 	}
-}
-
-// SetDelete sets if orphaned files should be deleted.
-func (s *Synchro) SetDelete(b bool) {
-	s.delete = b
-}
-
-// SetDelete sets if orphaned files should be deleted.
-func SetDelete(b bool) {
-	mainSynchro.SetDelete(b)
 }
 
 // DstFileData returns the map of FileData accumulated during the walk of the
@@ -217,6 +206,13 @@ func Delta() float64 {
 	return mainSynchro.Delta()
 }
 
+// SetDelete is used to set the mainSynchro's delete flag. When working
+// directly with a Synchro object, just set it, Synchro.Delete, instead of
+// calling this function.
+func SetDelete(b bool) {
+	mainSynchro.Delete = b
+}
+
 // Message returns stats about the last Synch.
 func (s *Synchro) Message() string {
 	var msg bytes.Buffer
@@ -254,7 +250,6 @@ func Message() string {
 //    * Files in destination not in source may be deleted.
 func (s *Synchro) Push(src, dst string) (string, error) {
 	s.t0 = time.Now()
-	fmt.Printf("Start push of %q to %q\n", src, dst)
 	Logf("Start push of %q to %q\n", src, dst)
 	// check to see if something was passed
 	if src == "" {
@@ -275,8 +270,11 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	s.src = src
 	s.dst = dst
 	// walk destination first
+	Log("filepathWalkDst():")
 	s.filepathWalkDst()
+
 	// walk source: this does all of the sync evaluations
+	Log("processSrc():")
 	err = s.processSrc()
 	if err != nil {
 		return "", err
@@ -398,8 +396,9 @@ func (s *Synchro) processSrc() error {
 	if err != nil {
 		return err
 	}
+	Logf("src: %s\tfullpath: %s\n", s.src, fullpath)
 	err = walk.Walk(fullpath, visitor)
-	if s.delete {
+	if s.Delete {
 		err = s.deleteOrphans()
 		if err != nil {
 			log.Printf("%s\n", err)
@@ -445,6 +444,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		log.Printf("%s\n", err)
 		return err
 	}
+	Logf("relPath: %s\n", relPath)
 	if relPath == "." { // don't do current dir, this shouldn't occur
 		return nil
 	}
@@ -462,6 +462,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	if err != nil {
 		return err
 	}
+	Logf("Action: %s\n", typ.String())
 	// Add stats to the appropriate accumulater.
 	switch typ {
 	case actionNew:
@@ -512,7 +513,7 @@ func (s *Synchro) setAction(relPath string, fi os.FileInfo) (actionType, error) 
 
 // copyFile copies the file.
 // TODO should a copy of the file be made in a tmp directory while its hash
-// is being computed, or in memory. Source would not need to be read and 
+// is being computed, or in memory. Source would not need to be read and
 // processed twice this way. If a copy operation is to occur, the tmp file
 // gets renamed to the destination, otherwise the tmp directory is cleaned up
 // at the end of the run.
@@ -573,7 +574,7 @@ func (s *Synchro) deleteFile() (*sync.WaitGroup, error) {
 }
 
 // update updates the fi of a file: currently mode, mdate, and atime
-// this is done on files whose contents haven't changes (hashes are equal) but
+// this is done on files whose contents haven't changes (Digests are equal) but
 // their properties have.
 // TODO add support for uid, gid
 func (s *Synchro) updateFile() (*sync.WaitGroup, error) {

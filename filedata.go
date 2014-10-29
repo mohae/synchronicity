@@ -128,7 +128,7 @@ func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 	}
 	h := Hash256{}
 	copy(h[:], hasher.Sum(nil))
-	fd.Hashes = append(fd.Hashes, Hash256(h))
+	fd.Digests = append(fd.Digests, Hash256(h))
 	return nil
 }
 
@@ -146,7 +146,7 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 		}
 		bytes += n
 		copy(h[:], hasher.Sum(nil))
-		fd.Hashes = append(fd.Hashes, Hash256(h))
+		fd.Digests = append(fd.Digests, Hash256(h))
 	}
 	if err != nil {
 		log.Printf("%s\n", err)
@@ -174,7 +174,8 @@ func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
 	defer f.Close()
 	// TODO support adaptive
 	chunks := int(fd.Fi.Size()/int64(fd.ChunkSize) + 1)
-	if chunks > len(fd.Hashes) {
+	if chunks > len(fd.Digests) || len(fd.Digests) == 0 {
+		Logf("IsEqualMixed...\n")
 		return fd.isEqualMixed(chunks, f, hasher, dstFd)
 	}
 
@@ -188,7 +189,7 @@ func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
 // found or an EOF is encountered.
 //
 func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd FileData) (bool, error) {
-	if len(dstFd.Hashes) > 0 {
+	if len(dstFd.Digests) > 0 {
 		equal, err := fd.isEqualCached(dstFd.MaxChunks, f, hasher, dstFd)
 		if err != nil {
 			return equal, err
@@ -218,11 +219,11 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 	// Check until EOF or a difference is found
 	for {
 		s, err := io.CopyN(hasher, f, fd.ChunkSize)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return false, err
 		}
 		d, err := io.CopyN(dstHasher, dstF, fd.ChunkSize)
-		if err != nil {
+		if err != nil && err != io.EOF {
 			return false, err
 		}
 		if d != s { // if the bytes copied were different, return false
@@ -232,6 +233,10 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 		copy(sH[:], hasher.Sum(nil))
 		if Hash256(dH) != Hash256(sH) {
 			return false, nil
+		}
+		// if EOF
+		if s == 0 && d == 0 {
+			break
 		}
 	}
 	return true, nil
@@ -246,7 +251,7 @@ func (fd *FileData) isEqualCached(chunks int, f *os.File, hasher hash.Hash, dstF
 			return false, err
 		}
 		copy(h[:], hasher.Sum(nil))
-		if Hash256(h) != dstFd.Hashes[i] {
+		if Hash256(h) != dstFd.Digests[i] {
 			return false, nil
 		}
 	}
