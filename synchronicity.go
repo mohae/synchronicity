@@ -19,6 +19,7 @@ import (
 	"github.com/MichaelTJones/walk"
 )
 
+type actionType int
 const (
 	actionNone   actionType = iota
 	actionNew               // creates new file in dst; doesn't exist in dst
@@ -27,8 +28,52 @@ const (
 	actionUpdate            // update file properties in dst; contents same but properties diff.
 )
 
-type actionType int
+type equalityType int
+const (
+	EqualityBasic equalityType = iota   // compare bytes for equality check
+	EqualityDigest			     // compare digests for equality check: digest entire file at once
+	EqualityChunkedDigest		     // compare digests for equality check digest using chunks
+)
 
+type hashType int        // Not really needed atm, but it'll be handy for adding other types.
+const (
+	invalid hashType = iota
+	SHA256
+)
+
+// Chunking settings: the best chunkSize is the one that allows the task to be
+// completed in the fastest amount of time. This depends on the system this
+// executes on.
+var MaxChunks = 4              // Modify directly to change buffered hashes
+var chunkSize = int64(16 * 1024) // use 16k chunks as default; cuts down on garbage
+
+// SetChunkSize sets the chunkSize as 1k * i, i.e. 4 == 4k chunkSize
+// If the multiplier, i, is <= 0, the default is used, 4.
+func SetChunkSize(i int) {
+	if i <= 0 {
+		i = 16
+	}
+	chunkSize = int64(1024 * i)
+}
+
+var useHashType hashType // The hash type to use to create the digest
+
+// SHA256 sized for hashed blocks.
+type Hash256 [32]byte
+
+func (h hashType) String() string {
+	switch h {
+	case SHA256:
+		return "sha256"
+	case invalid:
+		return "invalid"
+	}
+	return "unknown"
+}
+
+func init() {
+	useHashType = SHA256
+}
 func (a actionType) String() string {
 	switch a {
 	case actionNone:
@@ -45,6 +90,21 @@ func (a actionType) String() string {
 	return "unknown"
 }
 
+func (e equalityType) String() string {
+	switch e {
+	case EqualityBasic:
+		return "compare bytes"
+	case EqualityDigest:
+		return "compare digests"
+	case EqualityChunkedDigest:
+		return "compare chunked digests"
+	}
+	return "unknown"
+}
+
+// Equality type
+var defaultEqualityType equalityType
+
 // Defaults for new Synchro objects.
 var maxProcs int
 var cpuMultiplier int // 0 == 1, default == 2
@@ -54,6 +114,7 @@ func init() {
 	cpuMultiplier = 2
 	maxProcs = cpuMultiplier * cpu
 	mainSynchro = New()
+	defaultEqualityType = EqualityBasic
 }
 
 var mainSynchro *Synchro
@@ -103,9 +164,13 @@ type Synchro struct {
 	maxProcs int // maxProcs for this synchro.
 	// This lock structure is not used for walk/file channel related things.
 	lock               sync.Mutex
-	PrecomputeHash     bool
+	PreDigest	    bool // precompute digests for files
+	equalityType equalityType
 	Delete             bool // mutually exclusive with synch
 	PreserveProperties bool // Preserve file properties(uid, gid, mode)
+	hashType hashType // Hashing algorithm used for digests
+	chunkSize int64
+	MaxChunks int
 	// Filepaths to operate on
 	src     string
 	srcFull string // the fullpath version of src
@@ -113,7 +178,7 @@ type Synchro struct {
 	dstFull string // the dstFull version of dst
 	// A map of all the fileInfos by path
 	dstFileData map[string]FileData
-	srcFileData map[string]FileData
+//	srcFileData map[string]FileData
 	// Sync operation modifiers
 	// TODO wire up support for attrubute overriding
 	Owner int
@@ -157,6 +222,9 @@ func New() *Synchro {
 	return &Synchro{
 		maxProcs:           maxProcs,
 		dstFileData:        map[string]FileData{},
+		chunkSize: chunkSize,
+		MaxChunks: MaxChunks,
+		equalityType: EqualityBasic,
 		Delete:             true,
 		PreserveProperties: true,
 		ExcludeExt:         []string{},
@@ -170,6 +238,14 @@ func New() *Synchro {
 	}
 }
 
+func (s *Synchro) SetEqualityType(e equalityType) {
+	s.equalityType = e
+}
+
+func SetEqualityType(e equalityType) {
+	mainSynchro.SetEqualityType(e)
+}
+
 // DstFileData returns the map of FileData accumulated during the walk of the
 // destination.
 func (s *Synchro) DstFileData() map[string]FileData {
@@ -180,18 +256,6 @@ func (s *Synchro) DstFileData() map[string]FileData {
 // destination.
 func DstFileData() map[string]FileData {
 	return mainSynchro.DstFileData()
-}
-
-// SrcFileData returns the map of FileData accumulated during the walk of the
-// source.
-func (s *Synchro) SrcFileData() map[string]FileData {
-	return s.srcFileData
-}
-
-// SrcFileData returns the map of FileData accumulated during the walk of the
-// source.
-func SrcFileData() map[string]FileData {
-	return mainSynchro.srcFileData
 }
 
 func (s *Synchro) setDelta() {
@@ -359,10 +423,13 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return nil
 	}
 	// Gotten this far, hash it and add it to the dst list
-	fd := NewFileData(s.src, filepath.Dir(relPath), fi)
-	if s.PrecomputeHash {
+	fd := NewFileData(s.src, filepath.Dir(relPath), fi, s)
+
+	if s.PreDigest {
 		fd.SetHash()
 	}
+
+
 	s.lock.Lock()
 	s.dstFileData[fd.String()] = fd
 	s.lock.Unlock()
@@ -503,7 +570,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 //    Copy (file contents are different)
 //    New (new file)
 func (s *Synchro) setAction(relPath string, fi os.FileInfo) (actionType, error) {
-	srcFd := NewFileData(s.src, relPath, fi)
+	srcFd := NewFileData(s.src, relPath, fi, s)
 	fd, ok := s.dstFileData[srcFd.String()]
 	if !ok {
 		s.copyCh <- srcFd
@@ -785,6 +852,45 @@ func (s *Synchro) deleteOrphans() error {
 		s.delCh <- filepath.Join(s.dst, fd.String())
 	}
 	return nil
+}
+
+// SetHashType sets the hashtype to use based on the passed value.
+func SetHashType(s string) {
+	useHashType = ParseHashType(s)
+}
+
+// ParseHashType returns the hashType for a given string.
+func ParseHashType(s string) hashType {
+	s = strings.ToLower(s)
+	switch s {
+	case "sha256":
+		return SHA256
+	}
+	return invalid
+}
+
+// getFileParts splits the passed string into directory, filename, and file
+// extension, or as many of those parts that exist.
+func getFileParts(s string) (dir, file, ext string) {
+	// see if there is path involved, if there is, get the last part of it
+	dir, filename := filepath.Split(s)
+	parts := strings.Split(filename, ".")
+	l := len(parts)
+	switch l {
+	case 2:
+		file := parts[0]
+		ext := parts[1]
+		return dir, file, ext
+	case 1:
+		file := parts[0]
+		return dir, file, ext
+	default:
+		// join all but the last parts together with a "."
+		file := strings.Join(parts[0:l-1], ".")
+		ext := parts[l-1]
+		return dir, file, ext
+	}
+	return "", "", ""
 }
 
 func (s *Synchro) addNewStats(fi os.FileInfo) {
