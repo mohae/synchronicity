@@ -51,6 +51,8 @@ var cpuMultiplier int // 0 == 1, default == 2
 var cpu int = runtime.NumCPU()
 
 func init() {
+	cpuMultiplier = 2
+	maxProcs = cpuMultiplier * cpu
 	mainSynchro = New()
 }
 
@@ -261,7 +263,7 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	// Check for existence of src
 	_, err := os.Stat(src)
 	if err != nil {
-		log.Printf("%s\n", err)
+		log.Printf("error stat of %s: %s\n", src, err)
 		return "", err
 	}
 	// TODO check that destination is writable instead of relying on a later error
@@ -270,13 +272,12 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	s.src = src
 	s.dst = dst
 	// walk destination first
-	Log("filepathWalkDst():")
 	s.filepathWalkDst()
 
 	// walk source: this does all of the sync evaluations
-	Log("processSrc():")
 	err = s.processSrc()
 	if err != nil {
+		log.Printf("error processing %s: %s", s.src, err)
 		return "", err
 	}
 	return s.Message(), nil
@@ -305,12 +306,16 @@ func (s *Synchro) filepathWalkDst() error {
 	var fullpath string
 	visitor := func(p string, fi os.FileInfo, err error) error {
 		if err != nil || fi.Mode()&os.ModeType != 0 {
+			if err != nil {
+				log.Printf("error walking %s: %s", p, err)
+			}
 			return nil // skip special files
 		}
 		return s.addDstFile(fullpath, p, fi, err)
 	}
 	fullpath, err := filepath.Abs(s.dst)
 	if err != nil {
+		log.Printf("an error occurred while getting absolute path for %q: %s", s.dst, err, )
 		return err
 	}
 	walk.Walk(fullpath, visitor)
@@ -326,6 +331,7 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	// Check fileInfo to see if this should be added to archive
 	process, err := s.filterFileInfo(fi)
 	if err != nil {
+		log.Printf("an error occurred while filtering file info: %s", err)
 		return err
 	}
 	if !process {
@@ -335,6 +341,7 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	// Check path information to see if this should be processed.
 	process, err = s.filterPath(root, p)
 	if err != nil {
+		log.Printf("an error occurred while filtering path: %q %s", p, err)
 		return err
 	}
 	if !process {
@@ -344,7 +351,7 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	var relPath string
 	relPath, err = filepath.Rel(root, p)
 	if err != nil {
-		log.Printf("%s\n", err)
+		log.Printf("an error occurred while getting relative path for %s: %s", p, err)
 		return err
 	}
 	if relPath == "." {
@@ -367,48 +374,58 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 // it is returned.
 func (s *Synchro) processSrc() error {
 	// Push source to dest
-	s.copyCh = make(chan FileData)
-	s.delCh = make(chan string)
-	s.updateCh = make(chan FileData)
+	s.copyCh = make(chan FileData, 1)
+	s.delCh = make(chan string, 1)
+	s.updateCh = make(chan FileData, 1)
 	// Start the channel for copying
 	copyWait, err := s.copyFile()
 	if err != nil {
-		return err
-	}
-	// Start the channel for delete
-	delWait, err := s.deleteFile()
-	if err != nil {
+		log.Printf("an error occurred while processing file copies: %s", err)
 		return err
 	}
 	// Start the channel for update
 	updateWait, err := s.updateFile()
 	if err != nil {
+		log.Printf("an error occurred while updating files: %s", err)
 		return err
 	}
 	var fullpath string
 	visitor := func(p string, fi os.FileInfo, err error) error {
 		if err != nil || fi.Mode()&os.ModeType != 0 {
+			if err != nil {
+				log.Printf("error walking %s: %s", p, err)
+			}
 			return nil // skip special files
 		}
 		return s.addSrcFile(fullpath, p, fi, err)
 	}
 	fullpath, err = filepath.Abs(s.src)
 	if err != nil {
+		log.Printf("an error occurred while getting absolute path for %q: %s", s.src, err)
 		return err
 	}
-	Logf("src: %s\tfullpath: %s\n", s.src, fullpath)
 	err = walk.Walk(fullpath, visitor)
+	if err != nil {
+		log.Printf("synchronicity received a walk error: %s\n", err)
+		return err
+	}
 	if s.Delete {
-		err = s.deleteOrphans()
+		// Start the channel for delete
+		delWait, err := s.deleteFile()
 		if err != nil {
-			log.Printf("%s\n", err)
+			log.Printf("an error occurred while deleting files: %s", err)
 			return err
 		}
+		err = s.deleteOrphans()
+		if err != nil {
+			log.Printf("an error occurred while deleting files: %s\n", err)
+			return err
+		}
+		close(s.delCh)
+		delWait.Wait()
 	}
 	close(s.updateCh)
 	updateWait.Wait()
-	close(s.delCh)
-	delWait.Wait()
 	close(s.copyCh)
 	copyWait.Wait()
 	return err
@@ -424,6 +441,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	// Check fileInfo to see if this should be added to archive
 	process, err := s.filterFileInfo(fi)
 	if err != nil {
+		log.Printf("an error occurred while filtering src file info %s: %s", fi.Name(), err)
 		return err
 	}
 	if !process {
@@ -432,6 +450,7 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	// Check path information to see if this should be added.
 	process, err = s.filterPath(root, p)
 	if err != nil {
+		log.Printf("an error occurred while filtering src path info %s: %s", p, err)
 		return err
 	}
 	if !process {
@@ -441,10 +460,9 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	var relPath string
 	relPath, err = filepath.Rel(root, p)
 	if err != nil {
-		log.Printf("%s\n", err)
+		log.Printf("an error occurred while generating the relative path for %q: %s\n", p, err)
 		return err
 	}
-	Logf("relPath: %s\n", relPath)
 	if relPath == "." { // don't do current dir, this shouldn't occur
 		return nil
 	}
@@ -460,9 +478,9 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	// determine if it should be copied
 	typ, err := s.setAction(relPath, fi)
 	if err != nil {
+		log.Printf("an error occurred while setting the action for %s: %s", filepath.Join(relPath, fi.Name()), err)
 		return err
 	}
-	Logf("Action: %s\n", typ.String())
 	// Add stats to the appropriate accumulater.
 	switch typ {
 	case actionNew:
@@ -471,6 +489,8 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		s.addCopyStats(fi)
 	case actionUpdate:
 		s.addUpdateStats(fi)
+	case actionNone:
+		s.addDupStats(fi)
 	}
 	// otherwise its assumed to be actionNone
 	return nil
@@ -494,11 +514,13 @@ func (s *Synchro) setAction(relPath string, fi os.FileInfo) (actionType, error) 
 	fd.Processed = true
 	s.dstFileData[newFd.String()] = fd
 	// copy if its not the same as dest
-	𝛥, err := newFd.isEqual(fd)
+	Equal, err := newFd.isEqual(fd)
 	if err != nil {
+		log.Printf("an error occurred while checking equality for %s: %s", newFd.String(), err)
+		Logf("relPath: %s name: %s isDir %s", relPath, fi.Name(), strconv.FormatBool(fi.IsDir()))
 		return actionNone, err
 	}
-	if 𝛥 {
+	if !Equal {
 		s.copyCh <- newFd
 		return actionCopy, nil
 	}
@@ -527,26 +549,27 @@ func (s *Synchro) copyFile() (*sync.WaitGroup, error) {
 			// make any directories that are missing from the path
 			err := s.mkDirTree(fd.Dir)
 			if err != nil {
-				log.Printf("%s\n", err)
+				log.Printf("error making the directories for %s: %s\n", fd.Dir, err)
 				return err
 			}
 			r, err := os.Open(filepath.Join(s.src, fd.Dir, fd.Fi.Name()))
 			if err != nil {
-				log.Printf("%s\n", err)
+				log.Printf("error opening %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name()), err)
 				return err
 			}
-			defer r.Close()
 			dst := filepath.Join(s.dst, fd.Dir, fd.Fi.Name())
 			var w *os.File
 			w, err = os.Create(dst)
 			if err != nil {
-				log.Printf("%s\n", err)
+				log.Printf("error creating %s: %s\n", dst, err)
+				r.Close()
 				return err
 			}
-			defer w.Close()
 			_, err = io.Copy(w, r)
+			r.Close()
+			w.Close()
 			if err != nil {
-				log.Printf("%s\n", err)
+				log.Printf("error copying %s to %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name(), dst), err)
 				return err
 			}
 		}
@@ -564,7 +587,7 @@ func (s *Synchro) deleteFile() (*sync.WaitGroup, error) {
 		for fname := range s.delCh {
 			err := os.Remove(fname)
 			if err != nil {
-				log.Printf("%s\n", err)
+				log.Printf("error deleting %s: %s\n", fname, err)
 				return err
 			}
 		}
@@ -576,16 +599,24 @@ func (s *Synchro) deleteFile() (*sync.WaitGroup, error) {
 // update updates the fi of a file: currently mode, mdate, and atime
 // this is done on files whose contents haven't changes (Digests are equal) but
 // their properties have.
-// TODO add support for uid, gid
+// TODO add supportE for uid, gid
 func (s *Synchro) updateFile() (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() error {
 		defer wg.Done()
 		for fd := range s.updateCh {
-			p := filepath.Join(s.dst, fd.Fi.Name())
-			os.Chmod(p, fd.Fi.Mode())
-			os.Chtimes(p, fd.Fi.ModTime(), fd.Fi.ModTime())
+			p := filepath.Join(s.dst, fd.String())
+			err := os.Chmod(p, fd.Fi.Mode())
+			if err != nil {	
+				log.Printf("error updating mod of %s: %s", p, err)
+				return err
+			}
+			err = os.Chtimes(p, fd.Fi.ModTime(), fd.Fi.ModTime())
+			if err != nil {	
+				log.Printf("error updating mtime of %s: %s", p, err)
+				return err
+			}
 		}
 		return nil
 	}()
@@ -613,6 +644,7 @@ func (s *Synchro) filterPath(root, p string) (bool, error) {
 	}
 	b, err := s.includeFile(root, p)
 	if err != nil {
+		log.Printf("error: include file %s: %s", p, err)
 		return false, err
 	}
 	if !b {
@@ -620,6 +652,7 @@ func (s *Synchro) filterPath(root, p string) (bool, error) {
 	}
 	b, err = s.excludeFile(root, p)
 	if err != nil {
+		log.Printf("error: exclude files %s: %s", p, err)
 		return false, err
 	}
 	if b {
@@ -639,7 +672,7 @@ func (s *Synchro) includeFile(root, p string) (bool, error) {
 	if s.Include != "" {
 		matches, err := filepath.Match(s.Include, filepath.Join(root, p))
 		if err != nil {
-			log.Printf("%s\n", err)
+			log.Printf("error checking for includeFile match %s and %s: %s", root, p, err)
 			return false, err
 		}
 
@@ -669,6 +702,7 @@ func (s *Synchro) excludeFile(root, p string) (bool, error) {
 	if s.Exclude != "" {
 		matches, err := filepath.Match(s.Exclude, filepath.Join(root, p))
 		if err != nil {
+			log.Printf("error checking for excludeFile match: %s and %s: %s", root, p, err)
 			return false, err
 		}
 
@@ -701,8 +735,8 @@ func (s *Synchro) mkDirTree(p string) error {
 		if fi.IsDir() { // if the parent already exists
 			return nil
 		}
-		err := fmt.Errorf("mkdirTree: %s not a directory", filepath.Join(s.dst, p))
-		log.Printf("%s\n", err)
+		err := fmt.Errorf("%s not a directory", filepath.Join(s.dst, p))
+		log.Printf("error: mkDirTree: %s\n", err)
 		return err
 	}
 	pieces := strings.Split(p, "/")
@@ -723,17 +757,17 @@ func (s *Synchro) mkDirTree(p string) error {
 		}
 		fi, err := os.Stat(srcP)
 		if err != nil {
-			log.Printf("%s\n", err)
+			log.Printf("error mkDirTree Stat %s: %s\n", srcP, err)
 			return err
 		}
 		err = os.Mkdir(dstP, fi.Mode())
 		if err != nil {
-			log.Printf("%s\n", err)
+			log.Printf("error mkDirTree Mkdir %s: %s\n", dstP, err)
 			return err
 		}
 		err = os.Chtimes(dstP, fi.ModTime(), fi.ModTime())
 		if err != nil {
-			log.Printf("%s\n", err)
+			log.Printf("error mkDirTree Chtimes %s: %s\n", dstP, err)
 			return err
 		}
 		// TODO owner, group setting

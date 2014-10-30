@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -91,6 +92,7 @@ func (fd *FileData) SetHash() error {
 	if err != nil {
 		return err
 	}
+	defer f.Close()
 	if fd.ChunkSize == 0 {
 		return fd.hashFile(f, hasher)
 	}
@@ -98,9 +100,11 @@ func (fd *FileData) SetHash() error {
 }
 
 // getHasher returns a file and the hasher to use it on. If error, return that.
+// Caller is responsible for closing the file.
 func (fd *FileData) getFileHasher() (f *os.File, hasher hash.Hash, err error) {
 	f, err = os.Open(fd.RootPath())
 	if err != nil {
+		log.Printf("error opening %s: %s", fd.RootPath(), err)
 		return
 	}
 	hasher, err = fd.getHasher()
@@ -113,7 +117,8 @@ func (fd *FileData) getHasher() (hasher hash.Hash, err error) {
 	case SHA256:
 		hasher = sha256.New() //
 	default:
-		err = fmt.Errorf("%s hash type", fd.HashType.String())
+		err = fmt.Errorf("%s hash type not supported", fd.HashType.String())
+		log.Printf("error getting Hashtype: %s", err)
 		return
 	}
 	return
@@ -123,7 +128,7 @@ func (fd *FileData) getHasher() (hasher hash.Hash, err error) {
 func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 	_, err := io.Copy(hasher, f)
 	if err != nil {
-		log.Printf("%s/n", err)
+		log.Printf("error copying for hashfile: %s/n", err)
 		return err
 	}
 	h := Hash256{}
@@ -136,23 +141,19 @@ func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 // first.
 func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 	reader := bufio.NewReaderSize(f, int(fd.ChunkSize))
-	var cnt int
+//	var cnt int
 	var bytes int64
 	h := Hash256{}
-	for cnt = 0; cnt < MaxChunks; cnt++ { // read until EOF || MaxChunks
+	for cnt := 0; cnt < MaxChunks; cnt++ { // read until EOF || MaxChunks
 		n, err := io.CopyN(hasher, reader, int64(fd.ChunkSize))
 		if err != nil && err != io.EOF {
+			log.Printf("error copying chunked Hash file: %s", err)
 			return err
 		}
 		bytes += n
 		copy(h[:], hasher.Sum(nil))
 		fd.Digests = append(fd.Digests, Hash256(h))
 	}
-	if err != nil {
-		log.Printf("%s\n", err)
-		return err
-	}
-	_ = cnt
 	return nil
 }
 
@@ -163,19 +164,20 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 //
 // If they are of different lengths, we assume they are different
 func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
+	Logf("isEqual %s %s %s", fd.RootPath(), dstFd.RootPath(), strconv.FormatBool(fd.Fi.IsDir()))
 	if fd.Fi.Size() != dstFd.Fi.Size() {
 		return false, nil
 	}
 	// otherwise, examine the file contents
 	f, hasher, err := fd.getFileHasher()
 	if err != nil {
+		log.Printf("error evaluating equality %s: %s", fd.String(), err)
 		return false, err
 	}
 	defer f.Close()
 	// TODO support adaptive
 	chunks := int(fd.Fi.Size()/int64(fd.ChunkSize) + 1)
 	if chunks > len(fd.Digests) || len(fd.Digests) == 0 {
-		Logf("IsEqualMixed...\n")
 		return fd.isEqualMixed(chunks, f, hasher, dstFd)
 	}
 
@@ -192,6 +194,7 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 	if len(dstFd.Digests) > 0 {
 		equal, err := fd.isEqualCached(dstFd.MaxChunks, f, hasher, dstFd)
 		if err != nil {
+			log.Printf("error checking equality using precalculated digests for %s: %s", dstFd.String(), err)
 			return equal, err
 		}
 		if !equal {
@@ -202,16 +205,16 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 	dstF, err := os.Open(dstFd.RootPath())
 
 	// Go to the last read byte
-	var pos int64
 	if dstFd.CurByte > 0 {
-		pos, err = dstF.Seek(dstFd.CurByte, 0)
+		_, err = dstF.Seek(dstFd.CurByte, 0)
 		if err != nil {
+			log.Printf("error seeking byte %d: %s", dstFd.CurByte, err)
 			return false, err
 		}
 	}
-	_ = pos
 	dstHasher, err := fd.getHasher()
 	if err != nil {
+		log.Print("error getting hasher for %s: %s", fd.String(), err)
 		return false, err
 	}
 	dH := Hash256{}
@@ -220,10 +223,12 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 	for {
 		s, err := io.CopyN(hasher, f, fd.ChunkSize)
 		if err != nil && err != io.EOF {
+			log.Printf("error copying hasher for %s: %s", f.Name(), err)
 			return false, err
 		}
 		d, err := io.CopyN(dstHasher, dstF, fd.ChunkSize)
 		if err != nil && err != io.EOF {
+			log.Printf("error copying hasher for %s: ", err)
 			return false, err
 		}
 		if d != s { // if the bytes copied were different, return false
@@ -248,6 +253,7 @@ func (fd *FileData) isEqualCached(chunks int, f *os.File, hasher hash.Hash, dstF
 	for i := 0; i < chunks; i++ {
 		_, err := io.CopyN(hasher, f, fd.ChunkSize)
 		if err != nil {
+			log.Printf("error copying hasher for precalculated digest comparison %s: %s", fd.String(), err)
 			return false, err
 		}
 		copy(h[:], hasher.Sum(nil))
