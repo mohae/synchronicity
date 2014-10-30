@@ -153,17 +153,15 @@ func (fd *FileData) byteCompare(dstFd FileData) (bool, error) {
 	}
 	defer dstF.Close()
 	// go through each file until a difference is encountered or eof.
-	dstBufR := bufio.NewReaderSize(dstF, int(fd.synchro.chunkSize))
 	dstBuf := make([]byte, fd.synchro.chunkSize)
-	srcBufR := bufio.NewReaderSize(srcF, int(fd.synchro.chunkSize))
 	srcBuf := make([]byte, fd.synchro.chunkSize)
 	var srcN, dstN int
 	for {
-		srcN, err = srcBufR.Read(srcBuf)
+		srcN, err = srcF.Read(srcBuf)
 		if err != nil && err != io.EOF {
 			return false, err
 		}
-		dstN, err = dstBufR.Read(dstBuf)
+		dstN, err = dstF.Read(dstBuf)
 		if err != nil && err != io.EOF {
 			return false, err
 		}
