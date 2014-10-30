@@ -202,13 +202,6 @@ type Synchro struct {
 	copyCh   chan FileData
 	delCh    chan string
 	updateCh chan FileData
-	// Other Counters
-	newCount    counter
-	copyCount   counter
-	delCount    counter
-	updateCount counter
-	dupCount    counter
-	skipCount   counter
 	// timer
 	t0 time.Time
 	𝛥t float64
@@ -229,12 +222,6 @@ func New() *Synchro {
 		PreserveProperties: true,
 		ExcludeExt:         []string{},
 		IncludeExt:         []string{},
-		newCount:           newCounter("created"),
-		copyCount:          newCounter("copied"),
-		delCount:           newCounter("deleted"),
-		updateCount:        newCounter("updated"),
-		dupCount:           newCounter("duplicates and not updated"),
-		skipCount:          newCounter("skipped"),
 	}
 }
 
@@ -289,18 +276,6 @@ func (s *Synchro) Message() string {
 	msg.WriteString(" in ")
 	msg.WriteString(strconv.FormatFloat(s.𝛥t, 'f', 4, 64))
 	msg.WriteString(" seconds\n")
-	msg.WriteString(s.newCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.copyCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.updateCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.dupCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.delCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.skipCount.String())
-	msg.WriteString("\n")
 	return msg.String()
 }
 
@@ -399,7 +374,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if !process {
-		s.addSkipStats(fi)
 		return nil
 	}
 	// Check path information to see if this should be processed.
@@ -409,7 +383,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if !process {
-		s.addSkipStats(fi)
 		return nil
 	}
 	var relPath string
@@ -419,7 +392,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if relPath == "." {
-		s.addSkipStats(fi)
 		return nil
 	}
 	// Gotten this far, hash it and add it to the dst list
@@ -521,7 +493,6 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if !process {
-		s.addSkipStats(fi)
 		return nil
 	}
 	var relPath string
@@ -543,21 +514,10 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		}
 	}
 	// determine if it should be copied
-	typ, err := s.setAction(relPath, fi)
+	_, err = s.setAction(relPath, fi)
 	if err != nil {
 		log.Printf("an error occurred while setting the action for %s: %s", filepath.Join(relPath, fi.Name()), err)
 		return err
-	}
-	// Add stats to the appropriate accumulater.
-	switch typ {
-	case actionNew:
-		s.addNewStats(fi)
-	case actionCopy:
-		s.addCopyStats(fi)
-	case actionUpdate:
-		s.addUpdateStats(fi)
-	case actionNone:
-		s.addDupStats(fi)
 	}
 	// otherwise its assumed to be actionNone
 	return nil
@@ -848,7 +808,6 @@ func (s *Synchro) deleteOrphans() error {
 		if fd.Processed {
 			continue // processed files aren't orphaned
 		}
-		s.addDelStats(fd.Fi)
 		s.delCh <- filepath.Join(s.dst, fd.String())
 	}
 	return nil
@@ -891,46 +850,4 @@ func getFileParts(s string) (dir, file, ext string) {
 		return dir, file, ext
 	}
 	return "", "", ""
-}
-
-func (s *Synchro) addNewStats(fi os.FileInfo) {
-	s.lock.Lock()
-	s.newCount.Files++
-	s.newCount.Bytes += fi.Size()
-	s.lock.Unlock()
-}
-
-func (s *Synchro) addDelStats(fi os.FileInfo) {
-	s.lock.Lock()
-	s.delCount.Files++
-	s.delCount.Bytes += fi.Size()
-	s.lock.Unlock()
-}
-
-func (s *Synchro) addCopyStats(fi os.FileInfo) {
-	s.lock.Lock()
-	s.copyCount.Files++
-	s.copyCount.Bytes += fi.Size()
-	s.lock.Unlock()
-}
-
-func (s *Synchro) addUpdateStats(fi os.FileInfo) {
-	s.lock.Lock()
-	s.updateCount.Files++
-	s.updateCount.Bytes += fi.Size()
-	s.lock.Unlock()
-}
-
-func (s *Synchro) addDupStats(fi os.FileInfo) {
-	s.lock.Lock()
-	s.dupCount.Files++
-	s.dupCount.Bytes += fi.Size()
-	s.lock.Unlock()
-}
-
-func (s *Synchro) addSkipStats(fi os.FileInfo) {
-	s.lock.Lock()
-	s.skipCount.Files++
-	s.skipCount.Bytes += fi.Size()
-	s.lock.Unlock()
 }
