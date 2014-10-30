@@ -15,9 +15,8 @@ import (
 	"os"
 	"path/filepath"
 
-	_"runtime/pprof"
+	_ "runtime/pprof"
 )
-
 
 type FileData struct {
 	Processed bool
@@ -126,7 +125,7 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 //
 // If they are of different lengths, we assume they are different
 func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
-//	Logf("isEqual %s %s %s", fd.RootPath(), dstFd.RootPath(), strconv.FormatBool(fd.Fi.IsDir()))
+	//	Logf("isEqual %s %s %s", fd.RootPath(), dstFd.RootPath(), strconv.FormatBool(fd.Fi.IsDir()))
 	if fd.Fi.Size() != dstFd.Fi.Size() { // Check to see if size is different first
 		return false, nil
 	}
@@ -195,8 +194,9 @@ func (fd *FileData) hashCompare(dstFd FileData) (bool, error) {
 		return b, err
 	}
 
-	return fd.isEqualCached(chunks, f, hasher, dstFd)	
+	return fd.isEqualCached(chunks, f, hasher, dstFd)
 }
+
 // isEqualMixed is used when the file size is larger than the amount of bytes
 // we can precalculate, 128k by default. First the precalculated digests are
 // used, then the original destination file is read and the pointer moved to
@@ -231,8 +231,8 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 		log.Print("error getting hasher for %s: %s", dstFd.String(), err)
 		return false, err
 	}
-//	dH := Hash256{}
-//	sH := Hash256{}
+	//	dH := Hash256{}
+	//	sH := Hash256{}
 	// Check until EOF or a difference is found
 	dstReader := bufio.NewReaderSize(dstF, int(fd.synchro.chunkSize))
 	srcReader := bufio.NewReaderSize(f, int(fd.synchro.chunkSize))
@@ -250,9 +250,9 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 		if d != s { // if the bytes copied were different, return false
 			return false, nil
 		}
-//		copy(dH[:], dstHasher.Sum(nil))
-//		copy(sH[:], hasher.Sum(nil))
-//		if Hash256(dH) != Hash256(sH) {
+		//		copy(dH[:], dstHasher.Sum(nil))
+		//		copy(sH[:], hasher.Sum(nil))
+		//		if Hash256(dH) != Hash256(sH) {
 		if fmt.Sprintf("%x", dstHasher.Sum(nil)) != fmt.Sprintf("%x", hasher.Sum(nil)) {
 			return false, nil
 		}

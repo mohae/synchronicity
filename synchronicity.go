@@ -20,6 +20,7 @@ import (
 )
 
 type actionType int
+
 const (
 	actionNone   actionType = iota
 	actionNew               // creates new file in dst; doesn't exist in dst
@@ -29,13 +30,14 @@ const (
 )
 
 type equalityType int
+
 const (
-	EqualityBasic equalityType = iota   // compare bytes for equality check
-	EqualityDigest			     // compare digests for equality check: digest entire file at once
-	EqualityChunkedDigest		     // compare digests for equality check digest using chunks
+	EqualityBasic         equalityType = iota // compare bytes for equality check
+	EqualityDigest                            // compare digests for equality check: digest entire file at once
+	EqualityChunkedDigest                     // compare digests for equality check digest using chunks
 )
 
-type hashType int        // Not really needed atm, but it'll be handy for adding other types.
+type hashType int // Not really needed atm, but it'll be handy for adding other types.
 const (
 	invalid hashType = iota
 	SHA256
@@ -44,7 +46,7 @@ const (
 // Chunking settings: the best chunkSize is the one that allows the task to be
 // completed in the fastest amount of time. This depends on the system this
 // executes on.
-var MaxChunks = 4              // Modify directly to change buffered hashes
+var MaxChunks = 4               // Modify directly to change buffered hashes
 var chunkSize = int64(2 * 1024) // use 16k chunks as default; cuts down on garbage
 
 // SetChunkSize sets the chunkSize as 1k * i, i.e. 4 == 4k chunkSize
@@ -164,13 +166,13 @@ type Synchro struct {
 	maxProcs int // maxProcs for this synchro.
 	// This lock structure is not used for walk/file channel related things.
 	lock               sync.Mutex
-	PreDigest	    bool // precompute digests for files
-	equalityType equalityType
-	Delete             bool // mutually exclusive with synch
-	PreserveProperties bool // Preserve file properties(uid, gid, mode)
-	hashType hashType // Hashing algorithm used for digests
-	chunkSize int64
-	MaxChunks int
+	PreDigest          bool // precompute digests for files
+	equalityType       equalityType
+	Delete             bool     // mutually exclusive with synch
+	PreserveProperties bool     // Preserve file properties(uid, gid, mode)
+	hashType           hashType // Hashing algorithm used for digests
+	chunkSize          int64
+	MaxChunks          int
 	// Filepaths to operate on
 	src     string
 	srcFull string // the fullpath version of src
@@ -178,7 +180,7 @@ type Synchro struct {
 	dstFull string // the dstFull version of dst
 	// A map of all the fileInfos by path
 	dstFileData map[string]FileData
-//	srcFileData map[string]FileData
+	//	srcFileData map[string]FileData
 	// Sync operation modifiers
 	// TODO wire up support for attrubute overriding
 	Owner int
@@ -222,9 +224,9 @@ func New() *Synchro {
 	return &Synchro{
 		maxProcs:           maxProcs,
 		dstFileData:        map[string]FileData{},
-		chunkSize: chunkSize,
-		MaxChunks: MaxChunks,
-		equalityType: EqualityBasic,
+		chunkSize:          chunkSize,
+		MaxChunks:          MaxChunks,
+		equalityType:       EqualityBasic,
 		Delete:             true,
 		PreserveProperties: true,
 		ExcludeExt:         []string{},
@@ -428,7 +430,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	if s.PreDigest {
 		fd.SetHash()
 	}
-
 
 	s.lock.Lock()
 	s.dstFileData[fd.String()] = fd
