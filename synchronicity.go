@@ -45,13 +45,13 @@ const (
 // completed in the fastest amount of time. This depends on the system this
 // executes on.
 var MaxChunks = 4              // Modify directly to change buffered hashes
-var chunkSize = int64(16 * 1024) // use 16k chunks as default; cuts down on garbage
+var chunkSize = int64(2 * 1024) // use 16k chunks as default; cuts down on garbage
 
 // SetChunkSize sets the chunkSize as 1k * i, i.e. 4 == 4k chunkSize
 // If the multiplier, i, is <= 0, the default is used, 4.
 func SetChunkSize(i int) {
 	if i <= 0 {
-		i = 16
+		i = 2
 	}
 	chunkSize = int64(1024 * i)
 }
