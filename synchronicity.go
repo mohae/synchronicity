@@ -315,7 +315,7 @@ func (s *Synchro) filepathWalkDst() error {
 	}
 	fullpath, err := filepath.Abs(s.dst)
 	if err != nil {
-		log.Printf("an error occurred while getting absolute path for %q: %s", s.dst, err, )
+		log.Printf("an error occurred while getting absolute path for %q: %s", s.dst, err)
 		return err
 	}
 	walk.Walk(fullpath, visitor)
@@ -503,30 +503,29 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 //    Copy (file contents are different)
 //    New (new file)
 func (s *Synchro) setAction(relPath string, fi os.FileInfo) (actionType, error) {
-	newFd := NewFileData(s.src, relPath, fi)
-	fd, ok := s.dstFileData[newFd.String()]
+	srcFd := NewFileData(s.src, relPath, fi)
+	fd, ok := s.dstFileData[srcFd.String()]
 	if !ok {
-		s.copyCh <- newFd
+		s.copyCh <- srcFd
 		return actionNew, nil
 	}
 	// See the processed flag on existing dest file, for delete processing,
 	// if applicable.
 	fd.Processed = true
-	s.dstFileData[newFd.String()] = fd
+	s.dstFileData[srcFd.String()] = fd
 	// copy if its not the same as dest
-	Equal, err := newFd.isEqual(fd)
+	Equal, err := srcFd.isEqual(fd)
 	if err != nil {
-		log.Printf("an error occurred while checking equality for %s: %s", newFd.String(), err)
-		Logf("relPath: %s name: %s isDir %s", relPath, fi.Name(), strconv.FormatBool(fi.IsDir()))
+		log.Printf("an error occurred while checking equality for %s: %s", srcFd.String(), err)
 		return actionNone, err
 	}
 	if !Equal {
-		s.copyCh <- newFd
+		s.copyCh <- srcFd
 		return actionCopy, nil
 	}
 	// update if the properties are different
-	if newFd.Fi.Mode() != fd.Fi.Mode() || newFd.Fi.ModTime() != fd.Fi.ModTime() {
-		s.updateCh <- newFd
+	if srcFd.Fi.Mode() != fd.Fi.Mode() || srcFd.Fi.ModTime() != fd.Fi.ModTime() {
+		s.updateCh <- srcFd
 		return actionUpdate, nil
 	}
 	// Otherwise everything is the same, its a duplicate: do nothing
@@ -608,12 +607,12 @@ func (s *Synchro) updateFile() (*sync.WaitGroup, error) {
 		for fd := range s.updateCh {
 			p := filepath.Join(s.dst, fd.String())
 			err := os.Chmod(p, fd.Fi.Mode())
-			if err != nil {	
+			if err != nil {
 				log.Printf("error updating mod of %s: %s", p, err)
 				return err
 			}
 			err = os.Chtimes(p, fd.Fi.ModTime(), fd.Fi.ModTime())
-			if err != nil {	
+			if err != nil {
 				log.Printf("error updating mtime of %s: %s", p, err)
 				return err
 			}

@@ -13,7 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
+	_"strconv"
 	"strings"
 )
 
@@ -38,7 +38,7 @@ const (
 	SHA256
 )
 
-type hashType int // Not really needed atm, but it'll be handy for adding other types.
+type hashType int        // Not really needed atm, but it'll be handy for adding other types.
 var useHashType hashType // The hash type to use to create the digest
 
 // SHA256 sized for hashed blocks.
@@ -60,7 +60,7 @@ func init() {
 
 type FileData struct {
 	Processed bool
-	Digests    []Hash256
+	Digests   []Hash256
 	HashType  hashType
 	ChunkSize int64 // The chunksize that this was created with.
 	MaxChunks int
@@ -141,7 +141,7 @@ func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 // first.
 func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 	reader := bufio.NewReaderSize(f, int(fd.ChunkSize))
-//	var cnt int
+	//	var cnt int
 	var bytes int64
 	h := Hash256{}
 	for cnt := 0; cnt < MaxChunks; cnt++ { // read until EOF || MaxChunks
@@ -164,28 +164,36 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 //
 // If they are of different lengths, we assume they are different
 func (fd *FileData) isEqual(dstFd FileData) (bool, error) {
-	Logf("isEqual %s %s %s", fd.RootPath(), dstFd.RootPath(), strconv.FormatBool(fd.Fi.IsDir()))
+//	Logf("isEqual %s %s %s", fd.RootPath(), dstFd.RootPath(), strconv.FormatBool(fd.Fi.IsDir()))
 	if fd.Fi.Size() != dstFd.Fi.Size() {
 		return false, nil
 	}
 	// otherwise, examine the file contents
 	f, hasher, err := fd.getFileHasher()
 	if err != nil {
-		log.Printf("error evaluating equality %s: %s", fd.String(), err)
+		log.Printf("error getting hasher for %s: %s", fd.RootPath(), err)
 		return false, err
+	}
+	if f == nil {
+		log.Printf("Nil file handle encountered: %s", fd.RootPath())
+	}
+	if hasher == nil {
+		log.Printf("Nil hasher encountered for %s", fd.RootPath())
 	}
 	defer f.Close()
 	// TODO support adaptive
 	chunks := int(fd.Fi.Size()/int64(fd.ChunkSize) + 1)
-	if chunks > len(fd.Digests) || len(fd.Digests) == 0 {
-		return fd.isEqualMixed(chunks, f, hasher, dstFd)
+	if chunks > len(fd.Digests) {
+		b, err := fd.isEqualMixed(chunks, f, hasher, dstFd)
+		return b, err
 	}
 
-	return fd.isEqualCached(chunks, f, hasher, dstFd)
+	b, err := fd.isEqualCached(chunks, f, hasher, dstFd)
+	return b, err
 }
 
 // isEqualMixed is used when the file size is larger than the amount of bytes
-// we can precalculate, 128k by default. First the precalculated digests are 
+// we can precalculate, 128k by default. First the precalculated digests are
 // used, then the original destination file is read and the pointer moved to
 // the last read byte by the precalculation routine, until a difference is
 // found or an EOF is encountered.
@@ -201,9 +209,10 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 			return equal, nil
 		}
 	}
+
 	// Otherwise check the file from the current point
 	dstF, err := os.Open(dstFd.RootPath())
-
+	defer dstF.Close()
 	// Go to the last read byte
 	if dstFd.CurByte > 0 {
 		_, err = dstF.Seek(dstFd.CurByte, 0)
@@ -212,9 +221,9 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 			return false, err
 		}
 	}
-	dstHasher, err := fd.getHasher()
+	dstHasher, err := dstFd.getHasher()
 	if err != nil {
-		log.Print("error getting hasher for %s: %s", fd.String(), err)
+		log.Print("error getting hasher for %s: %s", dstFd.String(), err)
 		return false, err
 	}
 	dH := Hash256{}
@@ -223,12 +232,12 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 	for {
 		s, err := io.CopyN(hasher, f, fd.ChunkSize)
 		if err != nil && err != io.EOF {
-			log.Printf("error copying hasher for %s: %s", f.Name(), err)
+			log.Printf("error copying src hasher for %s: %s", fd.RootPath(), err)
 			return false, err
 		}
 		d, err := io.CopyN(dstHasher, dstF, fd.ChunkSize)
 		if err != nil && err != io.EOF {
-			log.Printf("error copying hasher for %s: ", err)
+			log.Printf("error copying dst hasher for %s: %s", dstFd.RootPath(), err)
 			return false, err
 		}
 		if d != s { // if the bytes copied were different, return false
@@ -277,7 +286,7 @@ func (fd *FileData) RootPath() string {
 	return filepath.Join(fd.Root, fd.Dir, fd.Fi.Name())
 }
 
-// SetHashType sets the hashtype to use based on the passed value. 
+// SetHashType sets the hashtype to use based on the passed value.
 func SetHashType(s string) {
 	useHashType = ParseHashType(s)
 }
