@@ -355,7 +355,7 @@ func (s *Synchro) Push(dst string, src string) (string, error) {
 //    * New files are created.
 //    * Files in destination not in source may be deleted.
 func Push(dst, src string) (string, error) {
-	return mainSynchro.Push(dst, src...)
+	return mainSynchro.Push(dst, src)
 }
 
 // Pull is just a Push from dst to src
