@@ -32,6 +32,9 @@ The source directory is then walked. For each file encountered, the destination 
 
 If `delete` is enabled, any orphaned files in the destination are deleted. An orphaned file is a file that exists in the destination but does not exist in the source.
 
+## Logging
+Synchronicity uses the standard `log` package. By default it logs to `ioutil.Discard`. Call `synchronicity.SetLogger(*io.writer*)` to set the log output destination. To enable verbose output, set the `synchronicity.Verbose` bool to `true`.  The verbose output is written to the log.
+
 ### Experimental filtering support
 Synchronicity has experimental support for file filtering using `include` and `exclude` filters. Include filters only looks at files that match the `include` filters. Exclude filters excludes any files that match the `exclude` filters. These filters can be applied to either file suffixes or as prefixes to filenames.
 
