@@ -5,7 +5,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strconv"
+	_"strconv"
 	"strings"
 	"testing"
 
@@ -15,8 +15,8 @@ import (
 func TestSynchroMessage(t *testing.T) {
 	s := New()
 	msg := s.Message()
-	delta := s.Delta()
-	expected := fmt.Sprintln(" was pushed to  in", strconv.FormatFloat(delta, 'f', 4, 64), "seconds\n0 files totalling 0 bytes were created\n0 files totalling 0 bytes were copied\n0 files totalling 0 bytes were updated\n0 files totalling 0 bytes were duplicates and not updated\n0 files totalling 0 bytes were deleted\n0 files totalling 0 bytes were skipped")
+	_ = s.Delta()
+	expected := fmt.Sprintln("'' was pushed to '' in 9223372036.855 seconds")
 	assert.Equal(t, msg, expected)
 }
 
