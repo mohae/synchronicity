@@ -316,15 +316,15 @@ func Message() string {
 //    * Modified files are overwritten, even if dst is newer
 //    * New files are created.
 //    * Files in destination not in source may be deleted.
-func (s *Synchro) Push(src, dst string) (string, error) {
+func (s *Synchro) Push(dst string, src string) (string, error) {
 	s.t0 = time.Now()
 	Logf("Start push of %q to %q\n", src, dst)
 	// check to see if something was passed
 	if src == "" {
-		return "", fmt.Errorf("source not set")
+		return "", fmt.Errorf("source not set; source is required.")
 	}
 	if dst == "" {
-		return "", fmt.Errorf("destination not set")
+		return "", fmt.Errorf("destination not set; destination is required")
 	}
 	// Check for existence of src
 	_, err := os.Stat(src)
@@ -354,18 +354,18 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 //    * Modified files are overwritten, even if dst is newer
 //    * New files are created.
 //    * Files in destination not in source may be deleted.
-func Push(src, dst string) (string, error) {
-	return mainSynchro.Push(src, dst)
+func Push(dst, src string) (string, error) {
+	return mainSynchro.Push(dst, src...)
 }
 
 // Pull is just a Push from dst to src
-func (s *Synchro) Pull(src, dst string) (string, error) {
-	return s.Push(dst, src)
+func (s *Synchro) Pull(dst, src string) (string, error) {
+	return "Not impelmented", nil
 }
 
 // Pull is just a Push from dst to src
 func Pull(src, dst string) (string, error) {
-	return mainSynchro.Pull(src, dst)
+	return "Not implemented", nil
 }
 
 func (s *Synchro) filepathWalkDst() error {
