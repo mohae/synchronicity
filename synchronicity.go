@@ -19,8 +19,6 @@ import (
 	"github.com/MichaelTJones/walk"
 )
 
-type actionType int
-
 const (
 	actionNone   actionType = iota
 	actionNew               // creates new file in dst; doesn't exist in dst
@@ -29,53 +27,8 @@ const (
 	actionUpdate            // update file properties in dst; contents same but properties diff.
 )
 
-type equalityType int
+type actionType int
 
-const (
-	EqualityBasic         equalityType = iota // compare bytes for equality check
-	EqualityDigest                            // compare digests for equality check: digest entire file at once
-	EqualityChunkedDigest                     // compare digests for equality check digest using chunks
-)
-
-type hashType int // Not really needed atm, but it'll be handy for adding other types.
-const (
-	invalid hashType = iota
-	SHA256
-)
-
-// Chunking settings: the best chunkSize is the one that allows the task to be
-// completed in the fastest amount of time. This depends on the system this
-// executes on.
-var MaxChunks = 4               // Modify directly to change buffered hashes
-var chunkSize = int64(2 * 1024) // use 16k chunks as default; cuts down on garbage
-
-// SetChunkSize sets the chunkSize as 1k * i, i.e. 4 == 4k chunkSize
-// If the multiplier, i, is <= 0, the default is used, 4.
-func SetChunkSize(i int) {
-	if i <= 0 {
-		i = 2
-	}
-	chunkSize = int64(1024 * i)
-}
-
-var useHashType hashType // The hash type to use to create the digest
-
-// SHA256 sized for hashed blocks.
-type Hash256 [32]byte
-
-func (h hashType) String() string {
-	switch h {
-	case SHA256:
-		return "sha256"
-	case invalid:
-		return "invalid"
-	}
-	return "unknown"
-}
-
-func init() {
-	useHashType = SHA256
-}
 func (a actionType) String() string {
 	switch a {
 	case actionNone:
@@ -92,22 +45,64 @@ func (a actionType) String() string {
 	return "unknown"
 }
 
+const (
+	EqualityBasic         equalityType = iota // compare bytes for equality check
+	EqualityDigest                            // compare digests for equality check: digest entire file at once
+	EqualityChunkedDigest                     // compare digests for equality check digest using chunks
+)
+
+type equalityType int
+
 func (e equalityType) String() string {
 	switch e {
 	case EqualityBasic:
 		return "compare bytes"
 	case EqualityDigest:
-		return "compare digests"
+		return "compare file digests"
 	case EqualityChunkedDigest:
 		return "compare chunked digests"
 	}
 	return "unknown"
 }
 
-// Equality type
-var defaultEqualityType equalityType
+const (
+	invalid hashType = iota
+	SHA256
+)
+
+type hashType int // Not really needed atm, but it'll be handy for adding other types.
+
+func (h hashType) String() string {
+	switch h {
+	case SHA256:
+		return "sha256"
+	case invalid:
+		return "invalid"
+	}
+	return "unknown"
+}
+
+// Chunking settings: the best chunkSize is the one that allows the task to be
+// completed in the fastest amount of time. This depends on the system this
+// executes on.
+var MaxChunks = 4               // Modify directly to change buffered hashes
+var chunkSize = int64(2 * 1024) // use 16k chunks as default; cuts down on garbage
+
+// SetChunkSize sets the chunkSize as 1k * i, i.e. 2 == 2k chunkSize
+// If the multiplier, i, is <= 0, the default is used, 2
+func SetChunkSize(i int) {
+	if i <= 0 {
+		i = 2
+	}
+	chunkSize = int64(1024 * i)
+}
+
+// SHA256 sized for hashed blocks.
+type Hash256 [32]byte
 
 // Defaults for new Synchro objects.
+var useHashType hashType         // The hash type to use to create the digest
+var useEqualityType equalityType // Equality type
 var maxProcs int
 var cpuMultiplier int // 0 == 1, default == 2
 var cpu int = runtime.NumCPU()
@@ -115,8 +110,9 @@ var cpu int = runtime.NumCPU()
 func init() {
 	cpuMultiplier = 2
 	maxProcs = cpuMultiplier * cpu
+	useEqualityType = EqualityBasic
+	useHashType = SHA256
 	mainSynchro = New()
-	defaultEqualityType = EqualityBasic
 }
 
 var mainSynchro *Synchro
@@ -126,7 +122,7 @@ func (s *Synchro) SetMaxProcs(i int) {
 	if i <= 0 {
 		s.maxProcs = 1
 	} else {
-		s.maxProcs = cpu * i
+		s.maxProcs = i
 	}
 }
 
@@ -140,6 +136,7 @@ func SetCPUMultiplier(i int) {
 	maxProcs = cpu * cpuMultiplier
 }
 
+// counter is an accumulator of file information.
 type counter struct {
 	Name  string
 	Files int32
@@ -163,9 +160,7 @@ func (c counter) String() string {
 // Synchro provides information about a sync operation. This trades memory for
 // CPU.
 type Synchro struct {
-	maxProcs int // maxProcs for this synchro.
-	// This lock structure is not used for walk/file channel related things.
-	lock               sync.Mutex
+	maxProcs           int  // maxProcs for this synchro.
 	PreDigest          bool // precompute digests for files
 	equalityType       equalityType
 	Delete             bool     // mutually exclusive with synch
@@ -174,13 +169,10 @@ type Synchro struct {
 	chunkSize          int64
 	MaxChunks          int
 	// Filepaths to operate on
-	src     string
-	srcFull string // the fullpath version of src
-	dst     string
-	dstFull string // the dstFull version of dst
+	src string
+	dst string
 	// A map of all the fileInfos by path
 	dstFileData map[string]FileData
-	//	srcFileData map[string]FileData
 	// Sync operation modifiers
 	// TODO wire up support for attrubute overriding
 	Owner int
@@ -204,7 +196,8 @@ type Synchro struct {
 	copyCh   chan FileData
 	delCh    chan string
 	updateCh chan FileData
-	// Other Counters
+	// Counters and update lock
+	lock        sync.Mutex
 	newCount    counter
 	copyCount   counter
 	delCount    counter
@@ -285,24 +278,37 @@ func SetDelete(b bool) {
 func (s *Synchro) Message() string {
 	var msg bytes.Buffer
 	s.setDelta()
+	msg.WriteString("'")
 	msg.WriteString(s.src)
-	msg.WriteString(" was pushed to ")
+	msg.WriteString("' was pushed to '")
 	msg.WriteString(s.dst)
-	msg.WriteString(" in ")
-	msg.WriteString(strconv.FormatFloat(s.𝛥t, 'f', 4, 64))
+	msg.WriteString("' in ")
+	msg.WriteString(strconv.FormatFloat(s.𝛥t, 'f', 3, 64))
 	msg.WriteString(" seconds\n")
-	msg.WriteString(s.newCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.copyCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.updateCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.dupCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.delCount.String())
-	msg.WriteString("\n")
-	msg.WriteString(s.skipCount.String())
-	msg.WriteString("\n")
+	if s.newCount.Files > 0 {
+		msg.WriteString(s.newCount.String())
+		msg.WriteString("\n")
+	}
+	if s.copyCount.Files > 0 {
+		msg.WriteString(s.copyCount.String())
+		msg.WriteString("\n")
+	}
+	if s.updateCount.Files > 0 {
+		msg.WriteString(s.updateCount.String())
+		msg.WriteString("\n")
+	}
+	if s.dupCount.Files > 0 {
+		msg.WriteString(s.dupCount.String())
+		msg.WriteString("\n")
+	}
+	if s.delCount.Files > 0 {
+		msg.WriteString(s.delCount.String())
+		msg.WriteString("\n")
+	}
+	if s.skipCount.Files > 0 {
+		msg.WriteString(s.skipCount.String())
+		msg.WriteString("\n")
+	}
 	return msg.String()
 }
 
@@ -360,7 +366,7 @@ func Push(dst, src string) (string, error) {
 
 // Pull is just a Push from dst to src
 func (s *Synchro) Pull(dst, src string) (string, error) {
-	return "Not impelmented", nil
+	return "Not implemented", nil
 }
 
 // Pull is just a Push from dst to src
@@ -374,6 +380,7 @@ func (s *Synchro) filepathWalkDst() error {
 		if err != nil || fi.Mode()&os.ModeType != 0 {
 			if err != nil {
 				log.Printf("error walking %s: %s", p, err)
+				return err
 			}
 			return nil // skip special files
 		}
@@ -666,7 +673,7 @@ func (s *Synchro) deleteFile() (*sync.WaitGroup, error) {
 // update updates the fi of a file: currently mode, mdate, and atime
 // this is done on files whose contents haven't changes (Digests are equal) but
 // their properties have.
-// TODO add supportE for uid, gid
+// TODO add support for uid, gid
 func (s *Synchro) updateFile() (*sync.WaitGroup, error) {
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -690,7 +697,7 @@ func (s *Synchro) updateFile() (*sync.WaitGroup, error) {
 	return &wg, nil
 }
 
-// See if the file should be filtered
+// filterFileInfo filters out files based on FileInfo settings.
 func (s *Synchro) filterFileInfo(fi os.FileInfo) (bool, error) {
 	// Don't add symlinks, otherwise would have to code some cycle
 	// detection amongst other stuff.
@@ -705,6 +712,7 @@ func (s *Synchro) filterFileInfo(fi os.FileInfo) (bool, error) {
 	return true, nil
 }
 
+// filterPath filters out files pased on path information.
 func (s *Synchro) filterPath(root, p string) (bool, error) {
 	if strings.HasSuffix(root, p) {
 		return false, nil
@@ -728,6 +736,7 @@ func (s *Synchro) filterPath(root, p string) (bool, error) {
 	return true, nil
 }
 
+// includeFile includes files based on its name and extension.
 func (s *Synchro) includeFile(root, p string) (bool, error) {
 	if s.IncludeAnchored != "" {
 		if strings.HasPrefix(filepath.Base(s.IncludeAnchored), p) {
@@ -758,6 +767,7 @@ func (s *Synchro) includeFile(root, p string) (bool, error) {
 	return true, nil
 }
 
+// excludeFile exludes files base on its name and extension.
 func (s *Synchro) excludeFile(root, p string) (bool, error) {
 	if s.ExcludeAnchored != "" {
 		if strings.HasPrefix(filepath.Base(p), s.ExcludeAnchored) {
@@ -792,7 +802,6 @@ func (s *Synchro) excludeFile(root, p string) (bool, error) {
 // already exist. This is needed because we process requests as we get them.
 // This means we can encounter a child, or later descendent, before its
 // ancestor. We also want to preserve as many properties as we can.
-//
 func (s *Synchro) mkDirTree(p string) error {
 	if p == "" {
 		return nil
@@ -850,7 +859,7 @@ func (s *Synchro) deleteOrphans() error {
 			continue // processed files aren't orphaned
 		}
 		s.addDelStats(fd.Fi)
-		s.delCh <- filepath.Join(s.dst, fd.String())
+		s.delCh <- fd.RootPath()
 	}
 	return nil
 }
@@ -894,6 +903,8 @@ func getFileParts(s string) (dir, file, ext string) {
 	return "", "", ""
 }
 
+// add*Stats updates their respective counters with the files length and
+// increments the file count.
 func (s *Synchro) addNewStats(fi os.FileInfo) {
 	s.lock.Lock()
 	s.newCount.Files++
