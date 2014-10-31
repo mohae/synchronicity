@@ -46,7 +46,8 @@ func (a actionType) String() string {
 }
 
 const (
-	EqualityBasic         equalityType = iota // compare bytes for equality check
+	EqualityUnknown         equalityType = iota
+	EqualityBasic                             // compare bytes for equality check
 	EqualityDigest                            // compare digests for equality check: digest entire file at once
 	EqualityChunkedDigest                     // compare digests for equality check digest using chunks
 )
@@ -63,6 +64,18 @@ func (e equalityType) String() string {
 		return "compare chunked digests"
 	}
 	return "unknown"
+}
+
+func ParseEqualityType(e string) equalityType {
+	switch e {
+	case "byte", "bytes":
+		return EqualityBasic
+	case "digest", "hash":
+		return EqualityDigest
+	case "chunked", "chunkeddigest", "chunkedhash":
+		return EqualityChunkedDigest
+	}
+	return EqualityUnknown
 }
 
 const (
@@ -239,6 +252,19 @@ func (s *Synchro) SetEqualityType(e equalityType) {
 
 func SetEqualityType(e equalityType) {
 	mainSynchro.SetEqualityType(e)
+}
+
+func (s *Synchro) SetEqualityTypeString(e string) (equalityType, error) {
+	eType := ParseEqualityType(e)
+	if eType == EqualityUnknown {
+		return eType, fmt.Errorf("unknown equality type: %s", e)
+	}
+	s.equalityType = eType
+	return eType, nil
+}
+
+func SetEqualityTypeString(e string) (equalityType, error) {
+	return mainSynchro.SetEqualityTypeString(e)
 }
 
 // DstFileData returns the map of FileData accumulated during the walk of the
