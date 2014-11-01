@@ -32,6 +32,7 @@ func NewFileData(root, dir string, fi os.FileInfo, s *Synchro) FileData {
 // os.FileInfo provides.
 type FileData struct {
 	Processed bool
+	TaskType taskType
 	Digests   []Hash256
 	synchro   *Synchro
 	CurByte   int64  // for when the while file hasn't been hashed and
