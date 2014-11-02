@@ -17,92 +17,101 @@ import (
 	"time"
 
 	"github.com/MichaelTJones/walk"
-)
-
-const (
-	taskNone   taskType = iota
-	taskNew               // creates new file in dst; doesn't exist in dst
-	taskCopy              // copy file from src to dst; contents are different.
-	taskDelete            // delete file from dst; doesn't exist in source
-	taskUpdate            // update file properties in dst; contents same but properties diff.
-)
-
-type taskType int
-
-func (t taskType) String() string {
-	switch t {
-	case taskNone:
-		return "duplicate"
-	case taskNew:
-		return "new"
-	case taskCopy:
-		return "copy"
-	case taskDelete:
-		return "delete"
-	case taskUpdate:
-		return "update"
-	}
-	return "unknown"
-}
-
-const (
-	EqualityUnknown         equalityType = iota
-	EqualityBasic                             // compare bytes for equality check
-	EqualityDigest                            // compare digests for equality check: digest entire file at once
-	EqualityChunkedDigest                     // compare digests for equality check digest using chunks
+	"gopkg.in/tomb.v2"
 )
 
 type equalityType int
 
+const (
+	UnknownEquality         equalityType = iota 
+	BasicEquality				// compare bytes for equality check
+	DigestEquality                            // compare digests for equality check: digest entire file at once
+	ChunkedEquality		                  // compare digests for equality check digest using chunks
+)
+
 func (e equalityType) String() string {
 	switch e {
-	case EqualityBasic:
+	case BasicEquality:
 		return "compare bytes"
-	case EqualityDigest:
-		return "compare file digests"
-	case EqualityChunkedDigest:
+	case DigestEquality:
+		return "compare digests"
+	case ChunkedEquality:
 		return "compare chunked digests"
 	}
 	return "unknown"
 }
 
-func ParseEqualityType(e string) equalityType {
-	switch e {
+
+func EqualityType(s string) equalityType {
+	switch s {
 	case "byte", "bytes":
-		return EqualityBasic
+		return BasicEquality
 	case "digest", "hash":
-		return EqualityDigest
+		return DigestEquality
 	case "chunked", "chunkeddigest", "chunkedhash":
-		return EqualityChunkedDigest
+		return ChunkedEquality
 	}
-	return EqualityUnknown
+	return UnknownEquality
 }
+type hashType int // Not really needed atm, but it'll be handy for adding other types.
 
 const (
-	invalid hashType = iota
+	invalidHash hashType = iota
 	SHA256
 )
 
-type hashType int // Not really needed atm, but it'll be handy for adding other types.
+// SHA256 sized for hashed blocks.
+type Hash256 [32]byte
 
 func (h hashType) String() string {
 	switch h {
 	case SHA256:
 		return "sha256"
-	case invalid:
-		return "invalid"
+	case invalidHash:
+		return "invalid hash type"
 	}
 	return "unknown"
 }
 
+type taskType int
+
+const (
+	nilTask   taskType = iota
+	newTask               // creates new file in dst; doesn't exist in dst
+	copyTask              // copy file from src to dst; contents are different.
+	deleteTask            // delete file from dst; doesn't exist in source
+	updateTask            // update file properties in dst; contents same but properties diff.
+)
+
+func (a taskType) String() string {
+	switch a {
+	case nilTask:
+		return "duplicate"
+	case newTask:
+		return "new"
+	case copyTask:
+		return "copy"
+	case deleteTask:
+		return "delete"
+	case updateTask:
+		return "update"
+	}
+	return "unknown"
+}
+
+// Defaults for new Synchro objects.
 // Chunking settings: the best chunkSize is the one that allows the task to be
 // completed in the fastest amount of time. This depends on the system this
 // executes on.
-var MaxChunks = 4               // Modify directly to change buffered hashes
-var chunkSize = int64(2 * 1024) // use 2k chunks as default; cuts down on garbage
-
-// SetChunkSize sets the chunkSize as 1k * i, i.e. 2 == 2k chunkSize
-// If the multiplier, i, is <= 0, the default is used
+var defaultEqualityType equalityType
+var defaultHashType hashType
+var MaxChunks = 4                // Modify directly to change buffered hashes
+var chunkSize = int64(2 * 1024) // use 16k chunks as default; cuts down on garbage
+var maxProcs int
+var cpuMultiplier int // 0 == 1, default == 2
+var cpu int = runtime.NumCPU()
+// SetChunkSize sets the chunkSize as 1k * i, i.e. 4 == 4k chunkSize
+// If the multiplier, i, is <= 0, the default is used, 4.
 func SetChunkSize(i int) {
 	if i <= 0 {
 		i = 2
@@ -110,32 +119,22 @@ func SetChunkSize(i int) {
 	chunkSize = int64(1024 * i)
 }
 
-// SHA256 sized for hashed blocks.
-type Hash256 [32]byte
-
-// Defaults for new Synchro objects.
-var useHashType hashType         // The hash type to use to create the digest
-var useEqualityType equalityType // Equality type
-var maxWorkers int // max go routines to process in flight files
-var cpuMultiplier int // 0 == 1, default == 2
-var cpu int = runtime.NumCPU()
-
 func init() {
-	cpuMultiplier = 2
-	maxWorkers = cpuMultiplier * cpu
-	useEqualityType = EqualityBasic
-	useHashType = SHA256
+	defaultHashType = SHA256
+	cpuMultiplier = 4
+	maxProcs = cpuMultiplier * cpu
 	mainSynchro = New()
+	defaultEqualityType = BasicEquality
 }
 
 var mainSynchro *Synchro
 
-// SetMaxWorkers sets the maxWorkers to the passed value, or 1 for <= 0.
-func (s *Synchro) SetMaxWorkers(i int) {
+// SetMaxProcs sets the maxProcs to the passed value, or 1 for <= 0.
+func (s *Synchro) SetMaxProcs(i int) {
 	if i <= 0 {
-		s.maxWorkers = 1
+		s.maxProcs = 1
 	} else {
-		s.maxWorkers = i
+		s.maxProcs = cpu * i
 	}
 }
 
@@ -146,10 +145,9 @@ func SetCPUMultiplier(i int) {
 		i = 1
 	}
 	cpuMultiplier = i
-	maxWorkers = cpu * cpuMultiplier
+	maxProcs = cpu * cpuMultiplier
 }
 
-// counter is an accumulator of file information.
 type counter struct {
 	Name  string
 	Files int32
@@ -173,6 +171,8 @@ func (c counter) String() string {
 // Synchro provides information about a sync operation. This trades memory for
 // CPU.
 type Synchro struct {
+	maxProcs int // maxProcs for this synchro.
+	// This lock structure is not used for walk/file channel related things.
 	PreDigest          bool // precompute digests for files
 	equalityType       equalityType
 	Delete             bool     // mutually exclusive with synch
@@ -180,12 +180,12 @@ type Synchro struct {
 	hashType           hashType // Hashing algorithm used for digests
 	chunkSize          int64
 	MaxChunks          int
-	WorkState	*workState
 	// Filepaths to operate on
-	src string
-	dst string
+	src     string
+	dst     string
 	// A map of all the fileInfos by path
-	dstFileData map[string]FileData
+	dstFileData map[string]*FileData
+	//	srcFileData map[string]FileData
 	// Sync operation modifiers
 	// TODO wire up support for attrubute overriding
 	Owner int
@@ -206,8 +206,10 @@ type Synchro struct {
 	NewerMTime time.Time
 	NewerFile  string
 	// Processing queue
-	workCh   chan FileData
-//	deleteCh string // We just need the path for deletes
+	taskCh   chan *FileData
+	// Queue management
+	tomb tomb.Tomb
+	wg sync.WaitGroup
 	// Counters and update lock
 	lock        sync.Mutex
 	newCount    counter
@@ -219,68 +221,21 @@ type Synchro struct {
 	// timer
 	t0 time.Time
 	𝛥t float64
+	tombstone	tomb.Tomb
 }
 
-func NewWorkState() *workState {
-	return &workState{maxWorkers: maxWorkers}
-}
-type workState struct {
-	firstError	error
-	jobs	chan FileData // work to do
-	lock	sync.RWMutex
-	maxWorkers int
-	workFunc	WorkFunc
-	workers		sync.WaitGroup // 
-}
-
-type WorkFunc func(fd fileData, err error) error
-
-func (ws *workState) done() bool {
-	ws.lock.RLock()
-	done := ws.firstError != nil
-	ws.lock.RUnlock()
-	return done
-}
-
-func (ws *worktState) setDone(err error) {
-	ws.lock.Lock()
-	if ws.firstError == nil {
-		ws.firstError = err
-	}
-	ws.lock.Unlock()
-}
-
-type (ws *workState) workJob() {
-	for fd :=  range ws.jobs {
-		ws.processFile(fd)
-		ws,jobs.Add(-1)
-	}
-}
-
-func (ws  *workState) processFile(fd FileData) {
-	if ws.done() {
-		return
-	}
-	err := ws.workFunc(fd, nil)
-	if err != nil {  // ??? or should I be checking setting terminate? L83
-		return
-	}
-	if !file.info.isDir() {
-		return
-	}
-}
 var unsetTime time.Time
 
 // New returns an initialized Synchro. Any overrides need to be done prior
 // to a Synchro operation.
 func New() *Synchro {
-	return &Synchro{
+	s := &Synchro{
 		maxProcs:           maxProcs,
-		dstFileData:        map[string]FileData{},
+		dstFileData:        map[string]*FileData{},
 		chunkSize:          chunkSize,
 		MaxChunks:          MaxChunks,
-		WorkState:	NewWorkState(),
-		equalityType:       EqualityBasic,
+		equalityType:       defaultEqualityType,
+		hashType:	    defaultHashType,
 		Delete:             true,
 		PreserveProperties: true,
 		ExcludeExt:         []string{},
@@ -292,41 +247,45 @@ func New() *Synchro {
 		dupCount:           newCounter("duplicates and not updated"),
 		skipCount:          newCounter("skipped"),
 	}
+	if s.equalityType == ChunkedEquality {
+		s.SetDigestChunkSize(0)
+	}
+	s.tomb.Go(s.doWork)
+	return s
 }
 
 func (s *Synchro) SetEqualityType(e equalityType) {
 	s.equalityType = e
+	if s.equalityType == ChunkedEquality {
+		s.SetDigestChunkSize(0)
+	}
+}
+
+// SetDigestChunkSize either sets the chunkSize, when a value > 0 is received, 
+// using the recieved int as a multipe of 1024 bytes. If the received value is
+// 0, it will use the current chunksize * 4.
+func (s *Synchro) SetDigestChunkSize(i int) {
+	// if its a non-zero value use it
+	if i > 0 {
+		s.chunkSize = int64(i * 1024)
+		return
+	}
+	s.chunkSize = s.chunkSize * 4
 }
 
 func SetEqualityType(e equalityType) {
 	mainSynchro.SetEqualityType(e)
 }
 
-func (s *Synchro) SetEqualityTypeString(e string) (equalityType, error) {
-	if e == "" { // return current equalityType for empty string
-		return s.equalityType, nil
-	}
-	eType := ParseEqualityType(e)
-	if eType == EqualityUnknown {
-		return eType, fmt.Errorf("unknown equality type: %s", e)
-	}
-	s.equalityType = eType
-	return eType, nil
-}
-
-func SetEqualityTypeString(e string) (equalityType, error) {
-	return mainSynchro.SetEqualityTypeString(e)
-}
-
 // DstFileData returns the map of FileData accumulated during the walk of the
 // destination.
-func (s *Synchro) DstFileData() map[string]FileData {
+func (s *Synchro) DstFileData() map[string]*FileData {
 	return s.dstFileData
 }
 
 // DstFileData returns the map of FileData accumulated during the walk of the
 // destination.
-func DstFileData() map[string]FileData {
+func DstFileData() map[string]*FileData {
 	return mainSynchro.DstFileData()
 }
 
@@ -355,12 +314,11 @@ func SetDelete(b bool) {
 func (s *Synchro) Message() string {
 	var msg bytes.Buffer
 	s.setDelta()
-	msg.WriteString("'")
 	msg.WriteString(s.src)
-	msg.WriteString("' was pushed to '")
+	msg.WriteString(" was pushed to ")
 	msg.WriteString(s.dst)
-	msg.WriteString("' in ")
-	msg.WriteString(strconv.FormatFloat(s.𝛥t, 'f', 3, 64))
+	msg.WriteString(" in ")
+	msg.WriteString(strconv.FormatFloat(s.𝛥t, 'f', 4, 64))
 	msg.WriteString(" seconds\n")
 	if s.newCount.Files > 0 {
 		msg.WriteString(s.newCount.String())
@@ -399,15 +357,15 @@ func Message() string {
 //    * Modified files are overwritten, even if dst is newer
 //    * New files are created.
 //    * Files in destination not in source may be deleted.
-func (s *Synchro) Push(dst string, src string) (string, error) {
+func (s *Synchro) Push(src, dst string) (string, error) {
 	s.t0 = time.Now()
 	Logf("Start push of %q to %q\n", src, dst)
 	// check to see if something was passed
 	if src == "" {
-		return "", fmt.Errorf("source not set; source is required.")
+		return "", fmt.Errorf("source not set")
 	}
 	if dst == "" {
-		return "", fmt.Errorf("destination not set; destination is required")
+		return "", fmt.Errorf("destination not set")
 	}
 	// Check for existence of src
 	_, err := os.Stat(src)
@@ -421,13 +379,8 @@ func (s *Synchro) Push(dst string, src string) (string, error) {
 	s.src = src
 	s.dst = dst
 	// walk destination first
-	err = s.filepathWalkDst()
-/*
-	if err != nil {
-		log.Printf("error walking %s: %s", s.dst, err)
-		return err
-	}
-*/
+	s.filepathWalkDst()
+
 	// walk source: this does all of the sync evaluations
 	err = s.processSrc()
 	if err != nil {
@@ -442,21 +395,18 @@ func (s *Synchro) Push(dst string, src string) (string, error) {
 //    * Modified files are overwritten, even if dst is newer
 //    * New files are created.
 //    * Files in destination not in source may be deleted.
-func Push(dst, src string) (string, error) {
-	return mainSynchro.Push(dst, src)
+func Push(src, dst string) (string, error) {
+	return mainSynchro.Push(src, dst)
 }
 
-// Pull is just a Push from dst to src; well with fan in support
-// it becomes a little more complicated than that; therefore 
-// implementation has been removed until variadic support is
-// added to push. THEN the pull command will get implemented.
-func (s *Synchro) Pull(dst, src string) (string, error) {
-	return "Not implemented", nil
+// Pull is just a Push from dst to src
+func (s *Synchro) Pull(src, dst string) (string, error) {
+	return s.Push(dst, src)
 }
 
 // Pull is just a Push from dst to src
 func Pull(src, dst string) (string, error) {
-	return "Not implemented", nil
+	return mainSynchro.Pull(src, dst)
 }
 
 func (s *Synchro) filepathWalkDst() error {
@@ -465,7 +415,6 @@ func (s *Synchro) filepathWalkDst() error {
 		if err != nil || fi.Mode()&os.ModeType != 0 {
 			if err != nil {
 				log.Printf("error walking %s: %s", p, err)
-				return err
 			}
 			return nil // skip special files
 		}
@@ -493,7 +442,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if !process {
-		s.addSkipStats(fi)
 		return nil
 	}
 	// Check path information to see if this should be processed.
@@ -503,7 +451,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if !process {
-		s.addSkipStats(fi)
 		return nil
 	}
 	var relPath string
@@ -513,7 +460,6 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if relPath == "." {
-		s.addSkipStats(fi)
 		return nil
 	}
 	// Gotten this far, hash it and add it to the dst list
@@ -529,16 +475,63 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 	return nil
 }
 
+func (s *Synchro) exec() error {
+	s.wg.Add(s.maxProcs)
+	for i := 0; i < 10; i++ {
+		s.tomb.Go(s.doWork)
+	}
+	return nil
+}
+
+func (s *Synchro) Stop() error {
+	s.tomb.Kill(nil)
+	return s.tomb.Wait()
+}
+
+func (s *Synchro) doWork() error {
+	var inTask <-chan *FileData
+	for {
+		select {
+		case <-s.tomb.Dying():
+			return nil
+		case <- s.taskCh:
+			inTask = s.taskCh
+			fd := <-inTask
+			switch fd.taskType {
+			case copyTask:
+				err := s.copyFile(fd)
+				if err != nil {
+					return err
+				}
+			case updateTask:
+				err := s.updateFile(fd)
+				if err != nil {
+					return err
+				}
+			case deleteTask:
+				err := s.deleteFile(fd)
+				if err != nil {
+					return err
+				}
+			default:
+				err := fmt.Errorf("unsupported task type for %s", fd.RelPath())
+				close(s.taskCh)
+				return err
+			}
+		}
+	}
+	return nil
+}	
+	
 // procesSrc indexes the source directory, figures out what's new and what's
 // changed, and triggering the appropriate task. If an error is encountered,
-// it is returned.
+// it is returned. The tomb is to manage the processes
 func (s *Synchro) processSrc() error {
+	s.taskCh = make(chan *FileData, 1)
+	err := s.exec()
 	// Push source to dest
-	s.workCh = make(chan FileData, 1)
-	// Start the channel for copying
-	workWait, err := s.doTasks()
 	if err != nil {
-		log.Printf("an error occurred while processing work tasks: %s", err)
+		log.Printf("an error occurred while processing files: %s", err)
 		return err
 	}
 	var fullpath string
@@ -561,29 +554,11 @@ func (s *Synchro) processSrc() error {
 		log.Printf("synchronicity received a walk error: %s\n", err)
 		return err
 	}
-/*
-	if s.Delete {
-		// Start the channel for delete
-		delWait, err := s.deleteFile()
-		if err != nil {
-			log.Printf("an error occurred while deleting files: %s", err)
-			return err
-		}
-		err = s.deleteOrphans()
-		if err != nil {
-			log.Printf("an error occurred while deleting files: %s\n", err)
-			return err
-		}
-		close(s.delCh)
-		delWait.Wait()
-	}
-*/
-	close(s.workCh)
-	workWait.Wait()
+	close(s.taskCh)
 	return err
 }
 
-// addSrcFile adds the info about the source file, then calls settask to
+// addSrcFile adds the info about the source file, then calls setTast to
 // determine what task should be done, if any.
 func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	// We don't add directories, they are handled by the mkdir process
@@ -606,7 +581,6 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		return err
 	}
 	if !process {
-		s.addSkipStats(fi)
 		return nil
 	}
 	var relPath string
@@ -628,23 +602,22 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		}
 	}
 	// determine if it should be copied
-	typ, err := s.setTask(relPath, fi)
+	task, err := s.setTask(relPath, fi)
 	if err != nil {
 		log.Printf("an error occurred while setting the task for %s: %s", filepath.Join(relPath, fi.Name()), err)
 		return err
 	}
 	// Add stats to the appropriate accumulater.
-	switch typ {
-	case taskNew:
+	switch task {
+	case newTask:
 		s.addNewStats(fi)
-	case taskCopy:
+	case copyTask:
 		s.addCopyStats(fi)
-	case taskUpdate:
+	case updateTask:
 		s.addUpdateStats(fi)
-	case taskNone:
+	case nilTask:
 		s.addDupStats(fi)
 	}
-	// otherwise its assumed to be taskNone
 	return nil
 }
 
@@ -658,9 +631,9 @@ func (s *Synchro) setTask(relPath string, fi os.FileInfo) (taskType, error) {
 	srcFd := NewFileData(s.src, relPath, fi, s)
 	fd, ok := s.dstFileData[srcFd.String()]
 	if !ok {
-		srcFd.TaskType = taskNew
-		s.workCh <- srcFd
-		return taskNew, nil
+		srcFd.taskType = newTask
+		s.taskCh <- srcFd
+		return srcFd.taskType, nil
 	}
 	// See the processed flag on existing dest file, for delete processing,
 	// if applicable.
@@ -670,33 +643,21 @@ func (s *Synchro) setTask(relPath string, fi os.FileInfo) (taskType, error) {
 	Equal, err := srcFd.isEqual(fd)
 	if err != nil {
 		log.Printf("an error occurred while checking equality for %s: %s", srcFd.String(), err)
-		return taskNone, err
+		return nilTask, err
 	}
 	if !Equal {
-		srcFd.TaskType = taskCopy
+		srcFd.taskType = copyTask
 		s.taskCh <- srcFd
-		return taskCopy, nil
+		return srcFd.taskType, nil
 	}
 	// update if the properties are different
 	if srcFd.Fi.Mode() != fd.Fi.Mode() || srcFd.Fi.ModTime() != fd.Fi.ModTime() {
-		srcFd.TaskType = taskUpdate
-		s.workCh <- srcFd
-		return taskUpdate, nil
+		srcFd.taskType = updateTask
+		s.taskCh <- srcFd
+		return srcFd.taskType, nil
 	}
 	// Otherwise everything is the same, its a duplicate: do nothing
-	return taskNone, nil
-}
-
-func (s *Synchro) doTasks() error {
-	ws := &WorkState{
-		tasks: make(chan FileData, 1024),
-	}
-	defer close(ws.tasks)
-	for i := 0; i < s.maxWorkers; i++ {
-		go ws.doTask()
-	}
-	ws.active.Wait()
-	return ws.firstError
+	return nilTask, nil
 }
 
 // copyFile copies the file.
@@ -705,91 +666,66 @@ func (s *Synchro) doTasks() error {
 // processed twice this way. If a copy operation is to occur, the tmp file
 // gets renamed to the destination, otherwise the tmp directory is cleaned up
 // at the end of the run.
-func (s *Synchro) copyFile() (*sync.WaitGroup, error) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() error {
-		defer wg.Done()
-		// process channel as we get items
-		for fd := range s.copyCh {
-			// make any directories that are missing from the path
-			err := s.mkDirTree(fd.Dir)
-			if err != nil {
-				log.Printf("error making the directories for %s: %s\n", fd.Dir, err)
-				return err
-			}
-			r, err := os.Open(filepath.Join(s.src, fd.Dir, fd.Fi.Name()))
-			if err != nil {
-				log.Printf("error opening %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name()), err)
-				return err
-			}
-			dst := filepath.Join(s.dst, fd.Dir, fd.Fi.Name())
-			var w *os.File
-			w, err = os.Create(dst)
-			if err != nil {
-				log.Printf("error creating %s: %s\n", dst, err)
-				r.Close()
-				return err
-			}
-			_, err = io.Copy(w, r)
-			r.Close()
-			w.Close()
-			if err != nil {
-				log.Printf("error copying %s to %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name(), dst), err)
-				return err
-			}
-		}
-		return nil
-	}()
-	return &wg, nil
+func (s *Synchro) copyFile(fd *FileData) error {
+	// make any directories that are missing from the path
+	err := s.mkDirTree(fd.Dir)
+	if err != nil {
+		log.Printf("error making the directories for %s: %s\n", fd.Dir, err)
+		return err
+	}
+	r, err := os.Open(filepath.Join(s.src, fd.Dir, fd.Fi.Name()))
+	if err != nil {
+		log.Printf("error opening %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name()), err)
+		return err
+	}
+	dst := filepath.Join(s.dst, fd.Dir, fd.Fi.Name())
+	var w *os.File
+	w, err = os.Create(dst)
+	if err != nil {
+		log.Printf("error creating %s: %s\n", dst, err)
+		r.Close()
+		return err
+	}
+	_, err = io.Copy(w, r)
+	r.Close()
+	w.Close()
+	if err != nil {
+		log.Printf("error copying %s to %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name()), dst, err)
+		return err
+	}
+	return nil
 }
 
 // deleteFile deletes any file for which it receives.
-func (s *Synchro) deleteFile() (*sync.WaitGroup, error) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() error {
-		defer wg.Done()
-		for fname := range s.delCh {
-			err := os.Remove(fname)
-			if err != nil {
-				log.Printf("error deleting %s: %s\n", fname, err)
-				return err
-			}
-		}
-		return nil
-	}()
-	return &wg, nil
+func (s *Synchro) deleteFile(fd *FileData) error {
+	err := os.Remove(fd.RootPath())
+	if err != nil {
+		log.Printf("error deleting %s: %s\n", fd.RootPath(), err)
+		return err
+	}
+	return nil
 }
 
 // update updates the fi of a file: currently mode, mdate, and atime
 // this is done on files whose contents haven't changes (Digests are equal) but
 // their properties have.
-// TODO add support for uid, gid
-func (s *Synchro) updateFile() (*sync.WaitGroup, error) {
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() error {
-		defer wg.Done()
-		for fd := range s.updateCh {
-			p := filepath.Join(s.dst, fd.String())
-			err := os.Chmod(p, fd.Fi.Mode())
-			if err != nil {
-				log.Printf("error updating mod of %s: %s", p, err)
-				return err
-			}
-			err = os.Chtimes(p, fd.Fi.ModTime(), fd.Fi.ModTime())
-			if err != nil {
-				log.Printf("error updating mtime of %s: %s", p, err)
-				return err
-			}
-		}
-		return nil
-	}()
-	return &wg, nil
+// TODO add supportE for uid, gid
+func (s *Synchro) updateFile(fd *FileData) error {
+	p := filepath.Join(s.dst, fd.String())
+	err := os.Chmod(p, fd.Fi.Mode())
+	if err != nil {
+		log.Printf("error updating mod of %s: %s", p, err)
+		return err
+	}
+	err = os.Chtimes(p, fd.Fi.ModTime(), fd.Fi.ModTime())
+	if err != nil {
+		log.Printf("error updating mtime of %s: %s", p, err)
+		return err
+	}
+	return nil
 }
 
-// filterFileInfo filters out files based on FileInfo settings.
+// See if the file should be filtered
 func (s *Synchro) filterFileInfo(fi os.FileInfo) (bool, error) {
 	// Don't add symlinks, otherwise would have to code some cycle
 	// detection amongst other stuff.
@@ -804,7 +740,6 @@ func (s *Synchro) filterFileInfo(fi os.FileInfo) (bool, error) {
 	return true, nil
 }
 
-// filterPath filters out files pased on path information.
 func (s *Synchro) filterPath(root, p string) (bool, error) {
 	if strings.HasSuffix(root, p) {
 		return false, nil
@@ -828,7 +763,6 @@ func (s *Synchro) filterPath(root, p string) (bool, error) {
 	return true, nil
 }
 
-// includeFile includes files based on its name and extension.
 func (s *Synchro) includeFile(root, p string) (bool, error) {
 	if s.IncludeAnchored != "" {
 		if strings.HasPrefix(filepath.Base(s.IncludeAnchored), p) {
@@ -859,7 +793,6 @@ func (s *Synchro) includeFile(root, p string) (bool, error) {
 	return true, nil
 }
 
-// excludeFile exludes files base on its name and extension.
 func (s *Synchro) excludeFile(root, p string) (bool, error) {
 	if s.ExcludeAnchored != "" {
 		if strings.HasPrefix(filepath.Base(p), s.ExcludeAnchored) {
@@ -894,6 +827,7 @@ func (s *Synchro) excludeFile(root, p string) (bool, error) {
 // already exist. This is needed because we process requests as we get them.
 // This means we can encounter a child, or later descendent, before its
 // ancestor. We also want to preserve as many properties as we can.
+//
 func (s *Synchro) mkDirTree(p string) error {
 	if p == "" {
 		return nil
@@ -950,15 +884,14 @@ func (s *Synchro) deleteOrphans() error {
 		if fd.Processed {
 			continue // processed files aren't orphaned
 		}
-		s.addDelStats(fd.Fi)
-		s.delCh <- fd.RootPath()
+		s.taskCh <- fd
 	}
 	return nil
 }
 
 // SetHashType sets the hashtype to use based on the passed value.
 func SetHashType(s string) {
-	useHashType = ParseHashType(s)
+	defaultHashType = ParseHashType(s)
 }
 
 // ParseHashType returns the hashType for a given string.
@@ -968,7 +901,7 @@ func ParseHashType(s string) hashType {
 	case "sha256":
 		return SHA256
 	}
-	return invalid
+	return invalidHash
 }
 
 // getFileParts splits the passed string into directory, filename, and file
@@ -995,7 +928,6 @@ func getFileParts(s string) (dir, file, ext string) {
 	return "", "", ""
 }
 
-// add*Stats updates their respective counters with the files length and
 // increments the file count.
 func (s *Synchro) addNewStats(fi os.FileInfo) {
 	s.lock.Lock()
