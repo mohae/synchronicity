@@ -23,10 +23,10 @@ import (
 type equalityType int
 
 const (
-	UnknownEquality         equalityType = iota 
-	BasicEquality				// compare bytes for equality check
-	DigestEquality                            // compare digests for equality check: digest entire file at once
-	ChunkedEquality		                  // compare digests for equality check digest using chunks
+	UnknownEquality equalityType = iota
+	BasicEquality                // compare bytes for equality check
+	DigestEquality               // compare digests for equality check: digest entire file at once
+	ChunkedEquality              // compare digests for equality check digest using chunks
 )
 
 func (e equalityType) String() string {
@@ -41,7 +41,6 @@ func (e equalityType) String() string {
 	return "unknown"
 }
 
-
 func EqualityType(s string) equalityType {
 	switch s {
 	case "byte", "bytes":
@@ -53,6 +52,7 @@ func EqualityType(s string) equalityType {
 	}
 	return UnknownEquality
 }
+
 type hashType int // Not really needed atm, but it'll be handy for adding other types.
 
 const (
@@ -76,11 +76,11 @@ func (h hashType) String() string {
 type taskType int
 
 const (
-	nilTask   taskType = iota
-	newTask               // creates new file in dst; doesn't exist in dst
-	copyTask              // copy file from src to dst; contents are different.
-	deleteTask            // delete file from dst; doesn't exist in source
-	updateTask            // update file properties in dst; contents same but properties diff.
+	nilTask    taskType = iota
+	newTask             // creates new file in dst; doesn't exist in dst
+	copyTask            // copy file from src to dst; contents are different.
+	deleteTask          // delete file from dst; doesn't exist in source
+	updateTask          // update file properties in dst; contents same but properties diff.
 )
 
 func (a taskType) String() string {
@@ -105,11 +105,12 @@ func (a taskType) String() string {
 // executes on.
 var defaultEqualityType equalityType
 var defaultHashType hashType
-var MaxChunks = 4                // Modify directly to change buffered hashes
+var MaxChunks = 4               // Modify directly to change buffered hashes
 var chunkSize = int64(2 * 1024) // use 16k chunks as default; cuts down on garbage
 var maxProcs int
 var cpuMultiplier int // 0 == 1, default == 2
 var cpu int = runtime.NumCPU()
+
 // SetChunkSize sets the chunkSize as 1k * i, i.e. 4 == 4k chunkSize
 // If the multiplier, i, is <= 0, the default is used, 4.
 func SetChunkSize(i int) {
@@ -181,8 +182,8 @@ type Synchro struct {
 	chunkSize          int64
 	MaxChunks          int
 	// Filepaths to operate on
-	src     string
-	dst     string
+	src string
+	dst string
 	// A map of all the fileInfos by path
 	dstFileData map[string]*FileData
 	//	srcFileData map[string]FileData
@@ -206,10 +207,10 @@ type Synchro struct {
 	NewerMTime time.Time
 	NewerFile  string
 	// Processing queue
-	taskCh   chan *FileData
+	taskCh chan *FileData
 	// Queue management
 	tomb tomb.Tomb
-	wg sync.WaitGroup
+	wg   sync.WaitGroup
 	// Counters and update lock
 	lock        sync.Mutex
 	newCount    counter
@@ -219,9 +220,9 @@ type Synchro struct {
 	dupCount    counter
 	skipCount   counter
 	// timer
-	t0 time.Time
-	𝛥t float64
-	tombstone	tomb.Tomb
+	t0        time.Time
+	𝛥t        float64
+	tombstone tomb.Tomb
 }
 
 var unsetTime time.Time
@@ -235,7 +236,7 @@ func New() *Synchro {
 		chunkSize:          chunkSize,
 		MaxChunks:          MaxChunks,
 		equalityType:       defaultEqualityType,
-		hashType:	    defaultHashType,
+		hashType:           defaultHashType,
 		Delete:             true,
 		PreserveProperties: true,
 		ExcludeExt:         []string{},
@@ -261,7 +262,7 @@ func (s *Synchro) SetEqualityType(e equalityType) {
 	}
 }
 
-// SetDigestChunkSize either sets the chunkSize, when a value > 0 is received, 
+// SetDigestChunkSize either sets the chunkSize, when a value > 0 is received,
 // using the recieved int as a multipe of 1024 bytes. If the received value is
 // 0, it will use the current chunksize * 4.
 func (s *Synchro) SetDigestChunkSize(i int) {
@@ -494,7 +495,7 @@ func (s *Synchro) doWork() error {
 		select {
 		case <-s.tomb.Dying():
 			return nil
-		case <- s.taskCh:
+		case <-s.taskCh:
 			inTask = s.taskCh
 			fd := <-inTask
 			switch fd.taskType {
@@ -521,8 +522,8 @@ func (s *Synchro) doWork() error {
 		}
 	}
 	return nil
-}	
-	
+}
+
 // procesSrc indexes the source directory, figures out what's new and what's
 // changed, and triggering the appropriate task. If an error is encountered,
 // it is returned. The tomb is to manage the processes
