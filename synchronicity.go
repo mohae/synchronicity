@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/MichaelTJones/walk"
-	"gopkg.in/tomb.v2"
+	tomb "gopkg.in/tomb.v2"
 )
 
 type equalityType int
@@ -251,7 +251,6 @@ func New() *Synchro {
 	if s.equalityType == ChunkedEquality {
 		s.SetDigestChunkSize(0)
 	}
-	s.tomb.Go(s.doWork)
 	return s
 }
 
@@ -381,8 +380,10 @@ func (s *Synchro) Push(src, dst string) (string, error) {
 	s.dst = dst
 	// walk destination first
 	s.filepathWalkDst()
-
+	Log("Destination indexed\n")
 	// walk source: this does all of the sync evaluations
+	s.tomb.Go(s.doWork)
+	Log("Process source...\n")
 	err = s.processSrc()
 	if err != nil {
 		log.Printf("error processing %s: %s", s.src, err)
@@ -421,6 +422,7 @@ func (s *Synchro) filepathWalkDst() error {
 		}
 		return s.addDstFile(fullpath, p, fi, err)
 	}
+	Logf("Indexing destination %q...\n", s.dst)
 	fullpath, err := filepath.Abs(s.dst)
 	if err != nil {
 		log.Printf("an error occurred while getting absolute path for %q: %s", s.dst, err)
@@ -432,6 +434,7 @@ func (s *Synchro) filepathWalkDst() error {
 
 // addDstFile just adds the info about the destination file
 func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
+	Logf("\t%s\n", p)
 	// We don't add directories, those are handled by their files.
 	if fi.IsDir() {
 		return nil
@@ -478,7 +481,7 @@ func (s *Synchro) addDstFile(root, p string, fi os.FileInfo, err error) error {
 
 func (s *Synchro) exec() error {
 	s.wg.Add(s.maxProcs)
-	for i := 0; i < 10; i++ {
+	for i := 0; i < s.maxProcs; i++ {
 		s.tomb.Go(s.doWork)
 	}
 	return nil
@@ -492,12 +495,19 @@ func (s *Synchro) Stop() error {
 func (s *Synchro) doWork() error {
 	var inTask <-chan *FileData
 	for {
+
 		select {
 		case <-s.tomb.Dying():
+			log.Printf("doWork: dying\n")
 			return nil
 		case <-s.taskCh:
 			inTask = s.taskCh
 			fd := <-inTask
+			if fd == nil {
+				s.Stop()
+				return nil
+			}
+			log.Printf("doWork: %s\n", fd.taskType.String())
 			switch fd.taskType {
 			case copyTask:
 				err := s.copyFile(fd)
@@ -515,8 +525,8 @@ func (s *Synchro) doWork() error {
 					return err
 				}
 			default:
+				s.Stop()
 				err := fmt.Errorf("unsupported task type for %s", fd.RelPath())
-				close(s.taskCh)
 				return err
 			}
 		}
@@ -528,7 +538,7 @@ func (s *Synchro) doWork() error {
 // changed, and triggering the appropriate task. If an error is encountered,
 // it is returned. The tomb is to manage the processes
 func (s *Synchro) processSrc() error {
-	s.taskCh = make(chan *FileData, 1)
+	s.taskCh = make(chan *FileData, 1024)
 	err := s.exec()
 	// Push source to dest
 	if err != nil {
@@ -550,12 +560,15 @@ func (s *Synchro) processSrc() error {
 		log.Printf("an error occurred while getting absolute path for %q: %s", s.src, err)
 		return err
 	}
+	Logf("Walk source %q...\n", s.src)
 	err = walk.Walk(fullpath, visitor)
 	if err != nil {
 		log.Printf("synchronicity received a walk error: %s\n", err)
 		return err
 	}
+	Log("Source walked\n")
 	close(s.taskCh)
+	Log("Task channel closed")
 	return err
 }
 
@@ -603,21 +616,10 @@ func (s *Synchro) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 		}
 	}
 	// determine if it should be copied
-	task, err := s.setTask(relPath, fi)
+	_, err = s.setTask(relPath, fi)
 	if err != nil {
 		log.Printf("an error occurred while setting the task for %s: %s", filepath.Join(relPath, fi.Name()), err)
 		return err
-	}
-	// Add stats to the appropriate accumulater.
-	switch task {
-	case newTask:
-		s.addNewStats(fi)
-	case copyTask:
-		s.addCopyStats(fi)
-	case updateTask:
-		s.addUpdateStats(fi)
-	case nilTask:
-		s.addDupStats(fi)
 	}
 	return nil
 }
@@ -634,6 +636,8 @@ func (s *Synchro) setTask(relPath string, fi os.FileInfo) (taskType, error) {
 	if !ok {
 		srcFd.taskType = newTask
 		s.taskCh <- srcFd
+		s.addNewStats(fi)
+		Logf("New file: %q\n", relPath)
 		return srcFd.taskType, nil
 	}
 	// See the processed flag on existing dest file, for delete processing,
@@ -648,16 +652,25 @@ func (s *Synchro) setTask(relPath string, fi os.FileInfo) (taskType, error) {
 	}
 	if !Equal {
 		srcFd.taskType = copyTask
+		s.addCopyStats(fi)
+		s.addCopyStats(fd.Fi)
 		s.taskCh <- srcFd
+		Logf("Copy %q to %q\n", relPath, fd.RelPath())
 		return srcFd.taskType, nil
 	}
 	// update if the properties are different
 	if srcFd.Fi.Mode() != fd.Fi.Mode() || srcFd.Fi.ModTime() != fd.Fi.ModTime() {
 		srcFd.taskType = updateTask
+		s.addUpdateStats(fi)
+		s.addUpdateStats(fd.Fi)
 		s.taskCh <- srcFd
+		Logf("Update %q with %q\n", fd.RelPath(), relPath)
 		return srcFd.taskType, nil
 	}
 	// Otherwise everything is the same, its a duplicate: do nothing
+	s.addDupStats(fi)
+	s.addDupStats(fd.Fi)
+	Logf("Duplicate files: %q and %q\n", fd.RelPath(), relPath)
 	return nilTask, nil
 }
 
@@ -886,6 +899,7 @@ func (s *Synchro) deleteOrphans() error {
 			continue // processed files aren't orphaned
 		}
 		s.taskCh <- fd
+		Logf("Delete %q\n", fd.RelPath())
 	}
 	return nil
 }
