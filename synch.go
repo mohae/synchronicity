@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/MichaelTJones/walk"
-	"gopkg.in/tomb.v2"
 )
 
 // New returns an initialized Synchro. Any overrides need to be done prior
@@ -367,28 +366,38 @@ func (s *Synch) evaluate() error {
 	//	var gz *gzip.Writer
 	// concurrently evaluate the actions
 	//	t tomb.Tomb
-
-	// start processor for evaluations
-	for p, fd := range s.srcFileData {
-		_ = p
-		_ = fd
+	s.tomb.Go(s.eval)
+	//
+	// send the sources down the channel for evaluation
+	for _, fd := range s.srcFileData {
+		s.workCh <- fd
 	}
 
 	return nil
 }
 
+// eval performs the actual evaluations of the src and dst files to determine what
+// should be done with them
 func (s *Synch) eval() error {
-	/*
+	var fdChan <-chan *FileData
+	for {
+		select {
+		case <-s.tomb.Dying():
+			return nil
+		case <-s.workCh:
+			fdChan = s.workCh
+			srcFd := <-fdChan
+			if fd == nil {
+				s.Stop()
+				return nil
+			}
 			dFd, ok = s.dstFileData[p]
 			if !ok {
 				fd.actionType = newAction
-				s.srcFileData[p] = fd
-				s.addNewStats(fd)
+				s.srcFileData[srcFd.FullPath()] = fd
+				s.addNewStats(fd.Fi)
 				continue
 			}
-			// Set the processed flag on existing dest file, for delete processing,
-				// if applicable.
-			dFd.Processed = true
 			// copy if its not the same as dest
 			equal, err := fd.isEqual(dFd)
 			if err != nil {
@@ -397,22 +406,28 @@ func (s *Synch) eval() error {
 			}
 			if !equal {
 				srcFd.taskType = copyAction
-				s.addCopyStats(dFd,fi)
+				s.addCopyStats(dFd, fi)
 				s.addCopyStats(fd.Fi)
-				continue
+				goto SetFd
 			}
 			// update if the properties are different
 			if srcFd.Fi.Mode() != fd.Fi.Mode() || srcFd.Fi.ModTime() != fd.Fi.ModTime() {
 				fd.taskType = updateAction
 				s.addUpdateStats(dFd.fi)
 				s.addUpdateStats(fd.Fi)
-				continue
 			}
+
+			// Set the processed flag on existing dest file, for delete processing,
+			// if applicable.
+		SetFd:
+			dFd.Processed = true
+			s.dstFileData[p] = dFd
+			s.srcFileData[srcFd.FullPath] = srcFd
 		}
 		// Otherwise everything is the same, its a duplicate: do nothing
 		s.addDupStats(fd.Fi)
 		s.addDupStats(dFd.Fi)
-	*/
+	}
 	return nil
 }
 
