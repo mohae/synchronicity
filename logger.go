@@ -1,6 +1,7 @@
 package synchronicity
 
 import (
+	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
@@ -17,8 +18,13 @@ func init() {
 	VLogger = log.New(ioutil.Discard, "synchro:", log.Lshortfile)
 }
 
+func DisableLog() {
+	log.SetOutput(ioutil.Discard)
+}
 func SetLogger(l io.Writer) {
+	fmt.Println("synchronicity.SetLogger set")
 	log.SetOutput(l)
+	log.Println("synchronicity.SetLogger set")
 }
 
 // SetVerbose sets the verbosity, a false also sets output to
@@ -26,9 +32,9 @@ func SetLogger(l io.Writer) {
 func SetVerbose(b bool) {
 	verbose = b
 	if b == false {
-		VLogger = log.New(ioutil.Discard, "synchro:", log.Lshortfile)
+		VLogger = log.New(ioutil.Discard, "synchro: ", log.Lmicroseconds)
 	} else {
-		VLogger = log.New(os.Stdout, "synchro:", log.Lshortfile)
+		VLogger = log.New(os.Stdout, "synchro: ", log.Lmicroseconds)
 	}
 }
 
@@ -40,7 +46,7 @@ func SetVerboseLogger(l io.Writer) {
 	} else {
 		verbose = true
 	}
-	VLogger = log.New(l, "synchro:", log.Lshortfile)
+	VLogger = log.New(l, "synchro: ", log.Lmicroseconds)
 }
 
 // Use for verbose output. Anything using Log() is for Verbosity.

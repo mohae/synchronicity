@@ -118,11 +118,12 @@ func init() {
 	defaultHashType = SHA256
 	cpuMultiplier = 4
 	maxProcs = cpuMultiplier * cpu
-	nSynch = New()
+	nSynch = NewSynch()
 	defaultEqualityType = BasicEquality
 }
 
-var nSynch *Synch // Synchronicity's global Synch
+var nSynch *Synch            // Synchronicity's global Synch
+var archSynch *ArchivedSynch // Synchronicity's global archived synch
 
 // SetMaxProcs sets the maxProcs to the passed value, or 1 for <= 0.
 func (s *Synch) SetMaxProcs(i int) {

@@ -14,32 +14,35 @@ import (
 	"time"
 
 	"github.com/MichaelTJones/walk"
+	tomb "gopkg.in/tomb.v2"
 )
 
 // New returns an initialized Synchro. Any overrides need to be done prior
 // to a Synchro operation.
-func New() *Synch {
+func NewSynch() *Synch {
 	s := &Synch{
 		maxProcs:           maxProcs,
 		dstFileData:        map[string]*FileData{},
 		srcFileData:        map[string]*FileData{},
 		chunkSize:          chunkSize,
-		MaxChunks:          MaxChunks,
 		equalityType:       defaultEqualityType,
 		hashType:           defaultHashType,
 		Delete:             true,
 		PreserveProperties: true,
-		ArchiveDst:         true,
-		ReadAll:            ReadAll,
-		newCount:           newCounter("created"),
-		copyCount:          newCounter("copied"),
-		delCount:           newCounter("deleted"),
-		updateCount:        newCounter("updated"),
-		dupCount:           newCounter("duplicates and not updated"),
-		skipCount:          newCounter("skipped"),
+		//		ArchiveDst:         true,
+		//		ArchiveFilename:    "archive-" + time.Now().Format("2006-01-02:15:04:05-MST") + ".tgz",
+		ReadAll:     ReadAll,
+		srcCount:    newCounter("in source were indexed"),
+		dstCount:    newCounter("in destination were indexed"),
+		newCount:    newCounter("created"),
+		copyCount:   newCounter("copied"),
+		delCount:    newCounter("deleted"),
+		updateCount: newCounter("updated"),
+		dupCount:    newCounter("duplicates and not updated"),
+		skipCount:   newCounter("skipped"),
 	}
 	if s.equalityType == ChunkedEquality {
-		s.SetDigestChunkSize(0)
+		s.SetHashChunkSize(0)
 	}
 	return s
 }
@@ -47,63 +50,60 @@ func New() *Synch {
 // Synchro provides information about a sync operation. This trades memory for
 // CPU.
 type Synch struct {
-	lock         sync.RWMutex // Read/Write lock
-	maxProcs     int          // maxProcs for this synchro.
-	PreDigest    bool         // precompute digests for files
-	chunkSize    int64
-	MaxChunks    int          // TODO work this out or remove
+	lock     sync.RWMutex // Read/Write lock
+	maxProcs int          // maxProcs for this synchro.
+	//	PreDigest    bool         // precompute digests for files
+	chunkSize    int64        // chink size for regular compare reads.
 	equalityType equalityType // the type of equality comparison between files
 	// Sync operation modifiers
-	hashType           hashType // Hashing algorithm used for digests
-	ArchiveDst         bool     // Archive Destination files that will be modified or deleted
-	Delete             bool     // Delete orphaned dst filed (doesn't exist in src)
-	PreserveProperties bool     // Preserve file properties(mode, mtime)
-	ReadAll            bool     // Read the entire file at once; false == chunked read
+	hashType hashType // Hashing algorithm used for digests
+	//	ArchiveDst         bool     // Archive Destination files that will be modified or deleted
+	//	ArchiveFilename    string   // ArchiveFilename defaults to: archive-2006-01-02:15:04:05-MST.tgz
+	Delete             bool // Delete orphaned dst filed (doesn't exist in src)
+	PreserveProperties bool // Preserve file properties(mode, mtime)
+	ReadAll            bool // Read the entire file at once; false == chunked read
 	// Filepaths to operate on
-	src string // Path of source directory
-	dst string // Path of destination directory
+	src     string // Path of source directory
+	fullSrc string // Full path of source directory
+	dst     string // Path of destination directory
+	fullDst string // Full path of destination directory
 	// A map of all the fileInfos by path
-	dstFileData   map[string]*FileData // map of destination file info
-	srcFileData   map[string]*FileData // map of src file info
-	processingSrc bool                 // if false, processing dst. Only used for walking
-	// TODO wire up support for attrubute overriding
-	Owner int
-	Group int
-	Mod   int64 // filemode
-
-	workCh chan *FileData // Channel for processing work. This is used in various stages.
-	tomb   tomb.Tomb      // Queue management
-	wg     sync.WaitGroup
-	Pipeline
-	// Counters
-	counterLock sync.Mutex // lock for updating counters
-	newCount    counter    // counter for new files
-	copyCount   counter    // counter for copied files; files whose contents have changed
-	delCount    counter    // counter for deleted files
-	updateCount counter    // counter for updated files; files whose properties have changed
-	dupCount    counter    // counter for duplicate files
-	skipCount   counter    // counter for skipped files.
-	t0          time.Time  // Start time of operation.
-	𝛥t          float64    // Change in time between start and end of operation
+	dstFileData map[string]*FileData // map of destination file info
+	srcFileData map[string]*FileData // map of src file info
+	//	processingSrc bool                 // if false, processing dst. Only used for walking
+	Mod         int64          // filemode
+	workCh      chan *FileData // Channel for processing work. This is used in various stages.
+	tomb        tomb.Tomb      // Queue management
+	counterLock sync.Mutex     // lock for updating counters
+	dstCount    counter        // counter for destination
+	srcCount    counter        // counter for source
+	newCount    counter        // counter for new files
+	copyCount   counter        // counter for copied files; files whose contents have changed
+	delCount    counter        // counter for deleted files
+	updateCount counter        // counter for updated files; files whose properties have changed
+	dupCount    counter        // counter for duplicate files
+	skipCount   counter        // counter for skipped files.
+	t0          time.Time      // Start time of operation.
+	𝛥t          float64        // Change in time between start and end of operation
 }
 
 func (s *Synch) SetEqualityType(e equalityType) {
 	s.equalityType = e
 	if s.equalityType == ChunkedEquality {
-		s.SetDigestChunkSize(0)
+		s.SetHashChunkSize(0)
 	}
 }
 
 // SetDigestChunkSize either sets the chunkSize, when a value > 0 is received,
 // using the recieved int as a multipe of 1024 bytes. If the received value is
 // 0, it will use the current chunksize * 4.
-func (s *Synch) SetDigestChunkSize(i int) {
+func (s *Synch) SetHashChunkSize(i int) {
 	// if its a non-zero value use it
 	if i > 0 {
 		s.chunkSize = int64(i * 1024)
 		return
 	}
-	s.chunkSize = s.chunkSize * 4
+	s.chunkSize = s.chunkSize * 8
 }
 
 func SetEqualityType(e equalityType) {
@@ -119,7 +119,7 @@ func (s *Synch) DstFileData() map[string]*FileData {
 // DstFileData returns the map of FileData accumulated during the walk of the
 // destination.
 func DstFileData() map[string]*FileData {
-	return nSynch.DstFileData()
+	return nSynch.dstFileData
 }
 
 // Delta returns the 𝛥 between the start and end of an operation/
@@ -149,6 +149,10 @@ func (s *Synch) Message() string {
 	msg.WriteString(" in ")
 	msg.WriteString(strconv.FormatFloat(s.𝛥t, 'f', 4, 64))
 	msg.WriteString(" seconds\n")
+	msg.WriteString(s.dstCount.String())
+	msg.WriteString("\n")
+	msg.WriteString(s.srcCount.String())
+	msg.WriteString("\n\n")
 	if s.newCount.Files > 0 {
 		msg.WriteString(s.newCount.String())
 		msg.WriteString("\n")
@@ -191,70 +195,59 @@ func (s *Synch) Push(src, dst string) (string, error) {
 	Logf("Start push of %q to %q\n", src, dst)
 	// check to see if something was passed
 	if src == "" {
-		return "", fmt.Errorf("source not set")
+		err := fmt.Errorf("synch.Push error: source not set")
+		log.Println(err)
+		return "", err
 	}
+
 	if dst == "" {
-		return "", fmt.Errorf("destination not set")
+		err := fmt.Errorf("synch.Push error: destination not set")
+		log.Println(err)
+		return "", err
 	}
+
 	// Check for existence of src
 	_, err := os.Stat(src)
 	if err != nil {
-		log.Printf("error stat of %s: %s\n", src, err)
-		return "", err
-	}
-	// Make sure dst directory exists and we can write to it
-	fi, err := os.Stat(dst)
-	if err != nil {
-		if !os.IsExist(err) {
-			log.Printf("synchronicity.Push error trying to check %q: %s", dst, err)
-			return "", err
-		}
-		err := os.MkdirAll(dst, 0640)
-		if err != nil {
-			log.Printf("synchronicity.Push error tyring to make the destination directory %q: %s", dst, err)
-			return "", err
-		}
-	}
-
-	if !fi.IsDir() {
-		err := fmt.Errorf("destination, %q, is not a directory", dst)
-		log.Println("synchronicity.Push error %s", err)
+		log.Printf("synch.Push error: %s\n", err)
 		return "", err
 	}
 
-	_, err = os.Create("test.txt")
+	err = s.ensureDirPath(dst) // ensure this is something we can work with
 	if err != nil {
-		log.Printf("synchronicity.Push error trying to create a file in %q: %s", dst, err)
+		log.Printf("synch.Push error: %s\n", err)
 		return "", err
 	}
-	os.Remove("test.txt")
 
 	s.src = src
-	s.dst = dst
-
-	// We preindex everything so that pre-action work, if applicable can be done.
-	s.filepathWalk()
-	s.processingSrc = true
-	s.filepathWalk()
-
-	// Evaluate the files to see what actions should be performed
-	// TODO: Add simulate flag
-	err = s.evaluate()
+	s.fullSrc, err = filepath.Abs(s.src)
 	if err != nil {
-		log.Printf("Synchronicity.Push error evaluating actions: %s", err)
+		log.Printf("synch.Push absolute path error for %q: %s", s.src, err)
+		return "", err
 	}
-	/*
-		err = s.process()
-		if err !- nil {
-			log.Printf("synchronicty.Push error processing actions: %s", err)
-			return "", err
-		}
-		err = s.execPipeline() // Build and run the action pipeline
-		if err != nil {
-			log.Printf("sychronicity.Push error processing %s: %s", s.src, err)
-			return "", err
-		}
-	*/
+
+	s.dst = dst
+	s.fullDst, err = filepath.Abs(s.dst)
+	if err != nil {
+		log.Printf("synch.Push absolute path error for %q: %s", s.dst, err)
+		return "", err
+	}
+
+	// Dst walk needs to be completed before we can compare walk source
+	err = s.filepathWalkDst()
+	if err != nil {
+		Log(err)
+		log.Printf("synch.Push walk error %q: %s", s.dst, err)
+		return "", err
+	}
+
+	Logf("%q indexed %d files", s.dst, len(s.dstFileData))
+	err = s.processSrc()
+	if err != nil {
+		log.Printf("synch.Push process error: %s", err)
+		return "", err
+	}
+
 	dstInfo := s.dstListByRelPath()
 	df, err := os.Create("dstList.txt")
 	if err != nil {
@@ -291,7 +284,14 @@ func Pull(src, dst string) (string, error) {
 	return nSynch.Pull(src, dst)
 }
 
-func (s *Synch) filepathWalk() error {
+// process() controls the processing of a non-archived synch.
+func (s *Synch) process() error {
+	return nil
+}
+
+// filepathWalk is a basic walker that adds the walked FileData to the appropriate
+// var. It will walk the src directory if s.processSrc == true, otherwise the dst.
+func (s *Synch) filepathWalkDst() error {
 	var fullpath string
 	visitor := func(p string, fi os.FileInfo, err error) error {
 		if err != nil || fi.Mode()&os.ModeType != 0 {
@@ -300,31 +300,24 @@ func (s *Synch) filepathWalk() error {
 			}
 			return nil // skip special files
 		}
-		return s.addFileData(fullpath, p, fi, err)
+		return s.addDstFileData(fullpath, p, fi, err)
 	}
 	var err error
-	if s.processingSrc {
-		fullpath, err = filepath.Abs(s.src)
-	} else {
-		fullpath, err = filepath.Abs(s.dst)
-	}
+	fullpath, err = filepath.Abs(s.dst)
 	if err != nil {
-		var path string
-		if s.processingSrc {
-			path = s.src
-		} else {
-			path = s.dst
-		}
-		log.Printf("synchronicity.filepathWalk error walking %q: %s", path, err)
+		log.Printf("synch.filepathWalkDst error generating fullpath for %q: %s", s.dst, err)
 		return err
 	}
-	walk.Walk(fullpath, visitor)
+	err = walk.Walk(fullpath, visitor)
+	if err != nil {
+		log.Printf("synch.filepathWalkDst error walking %q: %s", s.fullDst, err)
+		return err
+	}
 	return nil
 }
 
-// addFile just adds the info about the destination file
-func (s *Synch) addFileData(root, p string, fi os.FileInfo, err error) error {
-	Logf("\t%s\n", p)
+// addDstFileData just adds the info about the destination file
+func (s *Synch) addDstFileData(root, p string, fi os.FileInfo, err error) error {
 	// We don't add directories, those are handled by their files.
 	if fi.IsDir() {
 		return nil
@@ -332,103 +325,129 @@ func (s *Synch) addFileData(root, p string, fi os.FileInfo, err error) error {
 	var relPath string
 	relPath, err = filepath.Rel(root, p)
 	if err != nil {
-		log.Printf("an error occurred while getting relative path for %s: %s", p, err)
+		log.Printf("synch.addDstFileData error getting relative path for %q: %s", p, err)
 		return err
 	}
 	if relPath == "." {
 		return nil
 	}
 	// Gotten this far, read the file and add it to the dst list
-	var path string
-	if s.processingSrc {
-		path = s.src
-	} else {
-		path = s.dst
-	}
-	fd := NewFileData(path, filepath.Dir(relPath), fi, s)
+	fd := NewFileData(s.dst, filepath.Dir(relPath), fi, s)
 	// Send it to the read channel
 	s.lock.Lock()
-	if s.processingSrc {
-		s.srcFileData[fd.String()] = fd
-	} else {
-		s.dstFileData[fd.String()] = fd
-	}
+	s.dstFileData[fd.RelPath()] = fd
 	s.lock.Unlock()
+	s.addDstStats(fi)
 	return nil
 }
 
-// evaluate the FileInfos to determine what action should be performed for each
-// file inventoried.
-func (s *Synch) evaluate() error {
-	//	var dFd *FileData
-	//	var ok bool
-	//	var archiveBuf bytes.Buffer
-	//	var gz *gzip.Writer
-	// concurrently evaluate the actions
-	//	t tomb.Tomb
-	s.tomb.Go(s.eval)
-	//
-	// send the sources down the channel for evaluation
-	for _, fd := range s.srcFileData {
-		s.workCh <- fd
+func (s *Synch) exec() {
+	for i := 0; i < s.maxProcs; i++ {
+		s.tomb.Go(s.doWork)
 	}
-
-	return nil
 }
 
-// eval performs the actual evaluations of the src and dst files to determine what
-// should be done with them
-func (s *Synch) eval() error {
-	var fdChan <-chan *FileData
+func (s *Synch) Stop() error {
+	s.tomb.Kill(nil)
+	return s.tomb.Wait()
+}
+
+func (s *Synch) doWork() error {
 	for {
 		select {
-		case <-s.tomb.Dying():
-			return nil
-		case <-s.workCh:
-			fdChan = s.workCh
-			srcFd := <-fdChan
+		case fd := <-s.workCh:
 			if fd == nil {
-				s.Stop()
 				return nil
 			}
-			dFd, ok = s.dstFileData[p]
-			if !ok {
-				fd.actionType = newAction
-				s.srcFileData[srcFd.FullPath()] = fd
+			switch fd.actionType {
+			case newAction:
+				err := s.copyFile(fd)
+				if err != nil {
+					log.Printf("synch.doWork NEW error: %s", err)
+					s.tomb.Kill(err)
+					return err
+				}
 				s.addNewStats(fd.Fi)
-				continue
-			}
-			// copy if its not the same as dest
-			equal, err := fd.isEqual(dFd)
-			if err != nil {
-				log.Printf("an error occurred while checking equality for %s: %s", srcFd.String(), err)
-				return nilAction, err
-			}
-			if !equal {
-				srcFd.taskType = copyAction
-				s.addCopyStats(dFd, fi)
+			case copyAction:
+				err := s.copyFile(fd)
+				if err != nil {
+					log.Printf("synch.doWork COPY error: %s", err)
+					s.tomb.Kill(err)
+					return err
+				}
 				s.addCopyStats(fd.Fi)
-				goto SetFd
-			}
-			// update if the properties are different
-			if srcFd.Fi.Mode() != fd.Fi.Mode() || srcFd.Fi.ModTime() != fd.Fi.ModTime() {
-				fd.taskType = updateAction
-				s.addUpdateStats(dFd.fi)
+			case updateAction:
+				err := s.updateFile(fd)
+				if err != nil {
+					log.Printf("synch.doWork UPDATE error: %s", err)
+					s.tomb.Kill(err)
+					return err
+				}
 				s.addUpdateStats(fd.Fi)
+			case deleteAction:
+				err := s.deleteFile(fd)
+				if err != nil {
+					log.Printf("synch.doWork DELETE error: %s", err)
+					s.tomb.Kill(err)
+					return err
+				}
+				s.addDelStats(fd.Fi)
+			default:
+				err := fmt.Errorf("unsupported task type for %s", fd.RelPath())
+				log.Printf("synch.doWork unknown action error: %s", err)
+				s.tomb.Kill(err)
+				return err
 			}
-
-			// Set the processed flag on existing dest file, for delete processing,
-			// if applicable.
-		SetFd:
-			dFd.Processed = true
-			s.dstFileData[p] = dFd
-			s.srcFileData[srcFd.FullPath] = srcFd
+		case <-s.tomb.Dying():
+			return nil
 		}
-		// Otherwise everything is the same, its a duplicate: do nothing
-		s.addDupStats(fd.Fi)
-		s.addDupStats(dFd.Fi)
 	}
 	return nil
+}
+
+// procesSrc indexes the source directory, figures out what's new and what's
+// changed, and triggering the appropriate task. If an error is encountered,
+// it is returned. The tomb is to manage the processes
+func (s *Synch) processSrc() error {
+	var err error
+	var fullpath string
+	s.workCh = make(chan *FileData, 1024)
+	s.exec()
+	visitor := func(p string, fi os.FileInfo, err error) error {
+		if err != nil || fi.Mode()&os.ModeType != 0 {
+			if err != nil {
+				log.Printf("synch.processSrc error walking %q: %s\n", p, err)
+			}
+			return nil // skip special files
+		}
+		return s.addSrcFile(fullpath, p, fi, err)
+	}
+	fullpath, err = filepath.Abs(s.src)
+	if err != nil {
+		log.Printf("synch.processSrc error getting absolute path for %q: %s\n", s.src, err)
+		return err
+	}
+	Logf("Walk source %q...\n", fullpath)
+	err = walk.Walk(fullpath, visitor)
+	if err != nil {
+		log.Printf("synch.processSrc  walk error: %s\n", err)
+		return err
+	}
+
+	if s.Delete {
+		err := s.deleteOrphans()
+		if err != nil {
+			return err
+		}
+	}
+
+	close(s.workCh)
+	err = s.tomb.Wait()
+	if err != nil {
+		Logf("Error tomb wait: %s", err)
+	}
+
+	return err
 }
 
 // addSrcFile adds the info about the source file, then calls setTast to
@@ -441,7 +460,7 @@ func (s *Synch) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 	var relPath string
 	relPath, err = filepath.Rel(root, p)
 	if err != nil {
-		log.Printf("an error occurred while generating the relative path for %q: %s\n", p, err)
+		log.Printf("synch.addSrcFile error generating the relative path for %q: %s\n", p, err)
 		return err
 	}
 	if relPath == "." { // don't do current dir, this shouldn't occur
@@ -456,41 +475,80 @@ func (s *Synch) addSrcFile(root, p string, fi os.FileInfo, err error) error {
 			relPath = ""
 		}
 	}
+	// set the fileData info
+	srcFd := NewFileData(s.src, relPath, fi, s)
+	s.lock.Lock()
+	s.srcFileData[srcFd.RelPath()] = srcFd
+	s.lock.Unlock()
+	s.addSrcStats(fi)
 	// determine if it should be copied
-	/*
-		_, err = s.setAction(relPath, fi)
-		if err != nil {
-			log.Printf("an error occurred while setting the task for %s: %s", filepath.Join(relPath, fi.Name()), err)
-			return err
-		}
-		return nil
-	*/
+	_, err = s.setAction(relPath, srcFd)
+	if err != nil {
+		log.Printf("synch.addSrcFile error setting the task for %q: %s", filepath.Join(relPath, fi.Name()), err)
+		return err
+	}
 	return nil
 }
 
+// setAction examines the src/dst to determine what should be done.
+// Possible task outcomes are:
+//    Do nothing (file contents and properties are the same)
+//    Update (file contents are the same, but properties are diff)
+//    Copy (file contents are different)
+//    New (new file)
+func (s *Synch) setAction(relPath string, srcFd *FileData) (actionType, error) {
+	fd, ok := s.dstFileData[srcFd.RelPath()]
+	if !ok {
+		srcFd.actionType = newAction
+		s.workCh <- srcFd
+		return newAction, nil
+	}
+	// See the processed flag on existing dest file, for delete processing,
+	// if applicable.
+	fd.Processed = true
+	s.dstFileData[srcFd.RelPath()] = fd
+	// copy if its not the same as dest
+	Equal, err := srcFd.isEqual(fd)
+	if err != nil {
+		log.Printf("an error occurred while checking equality for %s: %s", srcFd.String(), err)
+		return nilAction, err
+	}
+	if !Equal {
+		srcFd.actionType = copyAction
+		s.workCh <- srcFd
+		return copyAction, nil
+	}
+	// update if the properties are different
+	if srcFd.Fi.Mode() != fd.Fi.Mode() || srcFd.Fi.ModTime() != fd.Fi.ModTime() {
+		srcFd.actionType = updateAction
+		s.workCh <- srcFd
+		return updateAction, nil
+	}
+	// Otherwise everything is the same, its a duplicate: do nothing
+	s.addDupStats(fd.Fi)
+	return nilAction, nil
+}
+
 // copyFile copies the file.
-// TODO should a copy of the file be made in a tmp directory while its hash
-// is being computed, or in memory. Source would not need to be read and
-// processed twice this way. If a copy operation is to occur, the tmp file
-// gets renamed to the destination, otherwise the tmp directory is cleaned up
-// at the end of the run.
 func (s *Synch) copyFile(fd *FileData) error {
 	// make any directories that are missing from the path
-	err := s.mkDirTree(fd.Dir)
+	Logf("COPY:\t%s", filepath.Dir(filepath.Join(s.dst, fd.RelPath())))
+	err := s.mkDirTree(filepath.Dir(fd.RelPath()))
 	if err != nil {
-		log.Printf("error making the directories for %s: %s\n", fd.Dir, err)
+		log.Printf("synch.copyFile make directory tree error: %s\n", err)
 		return err
 	}
-	r, err := os.Open(filepath.Join(s.src, fd.Dir, fd.Fi.Name()))
+	r, err := os.Open(fd.FullPath())
 	if err != nil {
-		log.Printf("error opening %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name()), err)
+		log.Printf("synch.copyFile error opening %s: %s\n", fd.FullPath(), err)
 		return err
 	}
-	dst := filepath.Join(s.dst, fd.Dir, fd.Fi.Name())
+	dst := filepath.Join(s.dst, fd.RelPath())
+	Logf("Synch.copyFile %q to %q\n", fd.RelPath(), dst)
 	var w *os.File
 	w, err = os.Create(dst)
 	if err != nil {
-		log.Printf("error creating %s: %s\n", dst, err)
+		log.Printf("synch.copyFile error creating %s: %s\n", dst, err)
 		r.Close()
 		return err
 	}
@@ -498,10 +556,16 @@ func (s *Synch) copyFile(fd *FileData) error {
 	r.Close()
 	w.Close()
 	if err != nil {
-		log.Printf("error copying %s to %s: %s\n", filepath.Join(s.src, fd.Dir, fd.Fi.Name()), dst, err)
+		log.Printf("synch.copyFile error copying %s to %s: %s\n", fd.FullPath(), dst, err)
+		Logf("error copying %s to %s: %s\n", fd.FullPath(), dst, err)
 		return err
 	}
-	return nil
+	fInfo, err := os.Stat(dst)
+	if err != nil {
+		log.Printf("synch.copyFile error getting FileInfo for %s\n", fd.FullPath(), dst, err)
+		return err
+	}
+	return s.updateFi(dst, fInfo)
 }
 
 // deleteOrphans delete any files in the destination that were not in the
@@ -511,8 +575,8 @@ func (s *Synch) deleteOrphans() error {
 		if fd.Processed {
 			continue // processed files aren't orphaned
 		}
+		fd.actionType = deleteAction
 		s.workCh <- fd
-		Logf("Delete %q\n", fd.RelPath())
 	}
 	return nil
 }
@@ -523,11 +587,12 @@ func (s *Synch) setDelta() {
 
 // deleteFile deletes any file for which it receives.
 func (s *Synch) deleteFile(fd *FileData) error {
-	err := os.Remove(fd.RootPath())
+	err := os.Remove(fd.FullPath())
 	if err != nil {
-		log.Printf("error deleting %s: %s\n", fd.RootPath(), err)
+		log.Printf("synch.deleteFile error: %s\n", err)
 		return err
 	}
+	Logf("DELETE %q\n", fd.RelPath())
 	return nil
 }
 
@@ -536,118 +601,26 @@ func (s *Synch) deleteFile(fd *FileData) error {
 // their properties have.
 // TODO add supportE for uid, gid
 func (s *Synch) updateFile(fd *FileData) error {
-	p := filepath.Join(s.dst, fd.String())
-	err := os.Chmod(p, fd.Fi.Mode())
+	p := filepath.Join(s.dst, fd.RelPath())
+	Logf("UPDATE: %s\n", p)
+	return s.updateFi(p, fd.Fi)
+}
+
+func (s *Synch) updateFi(p string, fi os.FileInfo) error {
+	err := os.Chmod(p, fi.Mode())
 	if err != nil {
-		log.Printf("error updating mod of %s: %s", p, err)
+		log.Printf("synch.updateFi mod error for %q: %s", p, err)
+		Logf("synch.updateFile mod error %q: %s", p, err)
 		return err
 	}
-	err = os.Chtimes(p, fd.Fi.ModTime(), fd.Fi.ModTime())
+	err = os.Chtimes(p, fi.ModTime(), fi.ModTime())
 	if err != nil {
-		log.Printf("error updating mtime of %s: %s", p, err)
+		log.Printf("synch.updateFi mtime error for %q: %s", p, err)
+		Logf("synch.updateFile mtime error %q: %s", p, err)
 		return err
 	}
 	return nil
 }
-
-/*
-// See if the file should be filtered
-func (s *Synch) filterFileInfo(fi os.FileInfo) (bool, error) {
-	// Don't add symlinks, otherwise would have to code some cycle
-	// detection amongst other stuff.
-	if fi.Mode()&os.ModeSymlink == os.ModeSymlink {
-		return false, nil
-	}
-	if s.NewerMTime != unsetTime {
-		if !fi.ModTime().After(s.NewerMTime) {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-
-func (s *Synch) filterPath(root, p string) (bool, error) {
-	if strings.HasSuffix(root, p) {
-		return false, nil
-	}
-	b, err := s.includeFile(root, p)
-	if err != nil {
-		log.Printf("error: include file %s: %s", p, err)
-		return false, err
-	}
-	if !b {
-		return false, nil
-	}
-	b, err = s.excludeFile(root, p)
-	if err != nil {
-		log.Printf("error: exclude files %s: %s", p, err)
-		return false, err
-	}
-	if b {
-		return false, nil
-	}
-	return true, nil
-}
-
-func (s *Synch) includeFile(root, p string) (bool, error) {
-	if s.IncludeAnchored != "" {
-		if strings.HasPrefix(filepath.Base(s.IncludeAnchored), p) {
-			return true, nil
-		}
-	}
-	// since we are just evaluating a file, we use match and look at the
-	// fullpath
-	if s.Include != "" {
-		matches, err := filepath.Match(s.Include, filepath.Join(root, p))
-		if err != nil {
-			log.Printf("error checking for includeFile match %s and %s: %s", root, p, err)
-			return false, err
-		}
-
-		if matches {
-			return true, nil
-		}
-	}
-	if s.IncludeExtCount > 0 {
-		for _, ext := range s.IncludeExt {
-			if strings.HasSuffix(filepath.Base(p), "."+ext) {
-				return true, nil
-			}
-		}
-		return false, nil
-	}
-	return true, nil
-}
-
-func (s *Synch) excludeFile(root, p string) (bool, error) {
-	if s.ExcludeAnchored != "" {
-		if strings.HasPrefix(filepath.Base(p), s.ExcludeAnchored) {
-			return true, nil
-		}
-	}
-	// since we are just evaluating a file, we use match and look at the
-	// fullpath
-	if s.Exclude != "" {
-		matches, err := filepath.Match(s.Exclude, filepath.Join(root, p))
-		if err != nil {
-			log.Printf("error checking for excludeFile match: %s and %s: %s", root, p, err)
-			return false, err
-		}
-
-		if matches {
-			return true, nil
-		}
-	}
-	if s.ExcludeExtCount != 0 {
-		for _, ext := range s.ExcludeExt {
-			if strings.HasSuffix(filepath.Base(p), "."+ext) {
-				return true, nil
-			}
-		}
-	}
-	return false, nil
-}
-*/
 
 func (s *Synch) dstListByRelPath() []byte {
 	return s.listByRelPaths(s.dstFileData)
@@ -674,55 +647,6 @@ func (s *Synch) listByRelPaths(filesD map[string]*FileData) []byte {
 	return inv
 }
 
-/*
-type Archive struct{}
-
-func (s *Synch) Process(in chan *FileData) chan *FileData {
-	out := make(chan *FileData)
-	go func() {
-		for fd := range in {
-			out <- *FileData
-		}
-		close(out) // close when drained
-	}()
-	return out
-}
-
-/*
-type Action struct{}
-
-func (s *Synch) Process(in chan *FileData) chan *FileData {
-	out := make(chan *FileData)
-	go func() {
-		for fd := range in {
-			out <- *FileData
-		}
-		close(out) // close when drained
-	}()
-	return out
-}
-*/
-
-/*
-// execPipeline creates a pipeline with the appropriate elements and manages it
-func (s *Synch) execPipeline() error {
-	var pipe Pipeline
-	stages := &[]Pipe{} // pipelines have stages. These stages are processed in order.
-	if s.ArchiveDst {
-		stages = append(stages, Archive{})
-	}
-	stages = append(stages, Action{})
-	pipe = NewPipeline(stages...)
-
-	return nil
-}
-
-func (s *Synch) Stop() error {
-	s.tomb.Kill(nil)
-	return s.tomb.Wait()
-}
-*/
-
 // mkDirTree takes a directory path and makes sure it exists. If it doesn't
 // exist it will create it, this includes any parent directories that don't
 // already exist. This is needed because we process requests as we get them.
@@ -733,18 +657,20 @@ func (s *Synch) mkDirTree(p string) error {
 	if p == "" {
 		return nil
 	}
+
 	fi, err := os.Stat(filepath.Join(s.dst, p))
 	if err == nil {
 		if fi.IsDir() { // if the parent already exists
 			return nil
 		}
 		err := fmt.Errorf("%s not a directory", filepath.Join(s.dst, p))
-		log.Printf("error: mkDirTree: %s\n", err)
+		log.Printf("synch.mkDirTree error: %s\n", err)
 		return err
 	}
 	pieces := strings.Split(p, "/")
 	dstP := s.dst
 	srcP := s.src
+
 	// from the root (our src, dst) make sure the directory exists create it
 	// if it doesn't. This is done until the last element in the path has
 	// been checked, this is because the path can be missing at any point
@@ -753,32 +679,77 @@ func (s *Synch) mkDirTree(p string) error {
 		// keep in synch, simplifies not found processing
 		dstP = filepath.Join(dstP, piece)
 		srcP = filepath.Join(srcP, piece)
-		// see if dst exiists
+		// see if dst exists
 		_, err = os.Stat(dstP)
 		if err == nil { // exists, move on
 			continue
 		}
 		fi, err := os.Stat(srcP)
 		if err != nil {
-			log.Printf("error mkDirTree Stat %s: %s\n", srcP, err)
+			log.Printf("synch.mkDirTree error: %s\n", srcP, err)
 			return err
 		}
 		err = os.Mkdir(dstP, fi.Mode())
 		if err != nil {
-			log.Printf("error mkDirTree Mkdir %s: %s\n", dstP, err)
+			log.Printf("synch.mkDirTree error: %s\n", dstP, err)
 			return err
 		}
 		err = os.Chtimes(dstP, fi.ModTime(), fi.ModTime())
 		if err != nil {
-			log.Printf("error mkDirTree Chtimes %s: %s\n", dstP, err)
+			log.Printf("error mkDirTree error: %s\n", dstP, err)
 			return err
 		}
-		// TODO owner, group setting
 	}
 	return nil
 }
 
+// ensurePath makes sure the passed path exists, is a directory, and is writeable.
+// If it has all those properties a nil is returned, otherwise it returns an error.
+func (s *Synch) ensureDirPath(p string) error {
+	// Make sure dst directory exists and we can write to it
+	fi, err := os.Stat(p)
+	if err != nil {
+		if !os.IsExist(err) {
+			log.Printf("synch.ensureDirPath error checking %q: %s", p, err)
+			return err
+		}
+		err := os.MkdirAll(p, 0640)
+		if err != nil {
+			log.Printf("synch.ensureDirPath error: %s", err)
+			return err
+		}
+	}
+
+	if !fi.IsDir() {
+		err := fmt.Errorf("destination, %q, is not a directory", p)
+		log.Printf("synch.ensureDirPath error %s", err)
+		return err
+	}
+
+	_, err = os.Create("test.txt")
+	if err != nil {
+		log.Printf("synch.ensureDirPath error trying to create a file in %q: %s", p, err)
+		return err
+	}
+	os.Remove("test.txt")
+	return nil
+}
+
 // increments the file count.
+func (s *Synch) addDstStats(fi os.FileInfo) {
+	s.counterLock.Lock()
+	s.dstCount.Files++
+	s.dstCount.Bytes += fi.Size()
+	s.counterLock.Unlock()
+}
+
+func (s *Synch) addSrcStats(fi os.FileInfo) {
+	s.counterLock.Lock()
+	s.srcCount.Files++
+	s.srcCount.Bytes += fi.Size()
+	s.counterLock.Unlock()
+}
+
 func (s *Synch) addNewStats(fi os.FileInfo) {
 	s.counterLock.Lock()
 	s.newCount.Files++

@@ -21,6 +21,7 @@ import (
 type FileData struct {
 	actionType
 	Processed bool
+	loaded    bool // whether or not this file's data has been loaded.
 	Digests   []Hash256
 	synchro   *Synch        // reference back to parent
 	CurByte   int64         // for when the while file hasn't been hashed and
@@ -46,21 +47,25 @@ func (fd *FileData) String() string {
 	return fd.RelPath()
 }
 
-// SetHash computes the hash of the FileData. The path of the file is passed
-// because FileData only knows it's name, not its location.
-func (fd *FileData) SetHash() error {
-	f, hasher, err := fd.getFileHasher()
+// readfile reads the passed file into the buffer
+func (fd *FileData) readfile() (n int64, err error) {
+	if fd.loaded { // TODO or should this trigger a reload of the file?
+		return fd.Fi.Size(), nil
+	}
+
+	f, err := os.Open(fd.FullPath())
 	if err != nil {
-		return err
+		log.Printf("FileData.readfile open file error: %s", err)
+		return int64(0), err
 	}
-	defer f.Close()
-	switch fd.synchro.equalityType {
-	case DigestEquality:
-		return fd.hashFile(f, hasher)
-	case ChunkedEquality:
-		return fd.chunkedHashFile(f, hasher)
+	n, err = io.Copy(fd.Buf, f)
+	if err != nil {
+		log.Printf("FileData.readfile copy error: %s", err)
+		return n, err
 	}
-	return nil
+	fd.loaded = true
+	err = f.Close()
+	return n, err
 }
 
 // getHasher returns a file and the hasher to use it on. If error, return that.
@@ -68,7 +73,7 @@ func (fd *FileData) SetHash() error {
 func (fd *FileData) getFileHasher() (f *os.File, hasher hash.Hash, err error) {
 	f, err = os.Open(fd.RootPath())
 	if err != nil {
-		log.Printf("error opening %s: %s", fd.RootPath(), err)
+		log.Printf("FileData.getFileHasher open error: %s", err)
 		return
 	}
 	hasher, err = fd.getHasher()
@@ -82,7 +87,7 @@ func (fd *FileData) getHasher() (hasher hash.Hash, err error) {
 		hasher = sha256.New() //
 	default:
 		err = fmt.Errorf("%s hash type not supported", fd.synchro.hashType.String())
-		log.Printf("error getting Hashtype: %s", err)
+		log.Printf("FileData.getHasher error: %s", err)
 		return
 	}
 	return
@@ -92,32 +97,12 @@ func (fd *FileData) getHasher() (hasher hash.Hash, err error) {
 func (fd *FileData) hashFile(f *os.File, hasher hash.Hash) error {
 	_, err := io.Copy(hasher, f)
 	if err != nil {
-		log.Printf("error copying for hashfile: %s/n", err)
+		log.Printf("FileData.hashFile copy error: %s/n", err)
 		return err
 	}
 	h := Hash256{}
 	copy(h[:], hasher.Sum(nil))
 	fd.Digests = append(fd.Digests, Hash256(h))
-	return nil
-}
-
-// chunkedHashFile reads up to max chunks, or the entire file, whichever comes
-// first.
-func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
-	reader := bufio.NewReaderSize(f, int(fd.synchro.chunkSize))
-	//	var cnt int
-	var bytes int64
-	h := Hash256{}
-	for cnt := 0; cnt < MaxChunks; cnt++ { // read until EOF || MaxChunks
-		n, err := io.CopyN(hasher, reader, int64(fd.synchro.chunkSize))
-		if err != nil && err != io.EOF {
-			log.Printf("error copying chunked Hash file: %s", err)
-			return err
-		}
-		bytes += n
-		copy(h[:], hasher.Sum(nil))
-		fd.Digests = append(fd.Digests, Hash256(h))
-	}
 	return nil
 }
 
@@ -128,66 +113,58 @@ func (fd *FileData) chunkedHashFile(f *os.File, hasher hash.Hash) (err error) {
 //
 // If they are of different lengths, we assume they are different
 func (fd *FileData) isEqual(compare *FileData) (bool, error) {
-	//	Logf("isEqual %s %s %s", fd.RootPath(), dstFd.RootPath(), strconv.FormatBool(fd.Fi.IsDir()))
 	if fd.Fi.Size() != compare.Fi.Size() { // Check to see if size is different first
 		return false, nil
 	}
 	// otherwise, examine the file contents
+	fd.readfile()
+	compare.readfile()
 	switch fd.synchro.equalityType {
 	case BasicEquality:
 		return fd.byteCompare(compare)
-		//	case DigestEquality, ChunkedEquality:
-		//		return fd.hashCompare(compare)
+	case DigestEquality, ChunkedEquality:
+		return fd.hashCompare(compare)
 	}
 	return false, fmt.Errorf("error: isEqual encountered an unsupported equality type %d", int(fd.synchro.equalityType))
 }
 
-func (fd *FileData) byteCompare(sink *FileData) (bool, error) {
-	/*
-		// open the files
-		src, err := os.Open(fd.RootPath())
-		if err != nil {
+func (fd *FileData) byteCompare(dstFd *FileData) (bool, error) {
+	// open the files
+	srcF, err := os.Open(fd.RootPath())
+	if err != nil {
+		return false, err
+	}
+	defer srcF.Close()
+	dstF, err := os.Open(dstFd.RootPath())
+	if err != nil {
+		return false, err
+	}
+	defer dstF.Close()
+	// go through each file until a difference is encountered or eof.
+	dstBuf := make([]byte, fd.synchro.chunkSize)
+	srcBuf := make([]byte, fd.synchro.chunkSize)
+	var srcN, dstN int
+	for {
+		srcN, err = srcF.Read(srcBuf)
+		if err != nil && err != io.EOF {
+			log.Printf("FileData.byteCompare error: %s", err)
 			return false, err
 		}
-		defer src.Close()
-		// use TeeReader for source; write to buffer so it isn't read twice.
-		srcT := io.TeeReader(src, fd.Buf)
-		sinkF, err := os.Open(sink.RootPath())
-		if err != nil {
+		dstN, err = dstF.Read(dstBuf)
+		if err != nil && err != io.EOF {
+			log.Printf("FileData.byteCompare error: %s", err)
 			return false, err
 		}
-		defer sinkF.Close()
-		// If archive, cache the dst file too
-		sinkT := io.TeeReader(sinkF, sink.Buf)
-
-		// go through each file until a difference is encountered or eof.
-		dstBuf := make([]byte, fd.synchro.chunkSize)
-		srcBuf := make([]byte, fd.synchro.chunkSize)
-		var srcN, dstN int
-		var equal bool
-		for {
-			srcN, err = srcT.Read(srcBuf)
-			if err != nil && err != io.EOF {
-
-			}
-			dstN, err = dstT.Read(dstBuf)
-			if err != nil && err != io.EOF {
-				break
-			}
-			if dstN == 0 && srcN == 0 {
-				equal = true
-				break
-			}
-			if !bytes.Equal(srcBuf[:srcN], dstBuf[:dstN]) {
-				break
-			}
+		if dstN == 0 && srcN == 0 {
+			return true, nil
 		}
-		return equal, nil
-	*/
+		if !bytes.Equal(srcBuf[:srcN], dstBuf[:dstN]) {
+			return false, nil
+		}
+	}
 	return false, nil
 }
 
-/*
 func (fd *FileData) hashCompare(dstFd *FileData) (bool, error) {
 	f, hasher, err := fd.getFileHasher()
 	if err != nil {
@@ -201,64 +178,39 @@ func (fd *FileData) hashCompare(dstFd *FileData) (bool, error) {
 		log.Printf("Nil hasher encountered for %s", fd.RootPath())
 	}
 	defer f.Close()
-	// TODO support adaptive
-	chunks := int(fd.Fi.Size()/int64(fd.synchro.chunkSize) + 1)
-	if chunks > len(fd.Digests) {
-		b, err := fd.isEqualMixed(chunks, f, hasher, dstFd)
-		return b, err
-	}
-
-	return fd.isEqualCached(chunks, f, hasher, dstFd)
+	return fd.chunkedHashIsEqual(f, hasher, dstFd)
 }
 
-// isEqualMixed is used when the file size is larger than the amount of bytes
-// we can precalculate, 128k by default. First the precalculated digests are
-// used, then the original destination file is read and the pointer moved to
-// the last read byte by the precalculation routine, until a difference is
-// found or an EOF is encountered.
-//
-func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd *FileData) (bool, error) {
-	if len(dstFd.Digests) > 0 {
-		equal, err := fd.isEqualCached(fd.synchro.MaxChunks, f, hasher, dstFd)
-		if err != nil {
-			log.Printf("error checking equality using precalculated digests for %s: %s", dstFd.String(), err)
-			return equal, err
-		}
-		if !equal {
-			return equal, nil
-		}
-	}
-
+// chunkedHashIsEqual calculates the hash of the file, in chunks.
+func (fd *FileData) chunkedHashIsEqual(f *os.File, hasher hash.Hash, dstFd *FileData) (bool, error) {
 	// Otherwise check the file from the current point
 	dstF, err := os.Open(dstFd.RootPath())
-	defer dstF.Close()
-	// Go to the last read byte
-	if dstFd.CurByte > 0 {
-		_, err = dstF.Seek(dstFd.CurByte, 0)
-		if err != nil {
-			log.Printf("error seeking byte %d: %s", dstFd.CurByte, err)
-			return false, err
-		}
+	if err != nil {
+		log.Printf("FileData.chunkedHashIsEqual open error: %s", err)
+		return false, err
 	}
+	// TODO write to capture error
+	defer dstF.Close()
 	dstHasher, err := dstFd.getHasher()
 	if err != nil {
-		log.Print("error getting hasher for %s: %s", dstFd.String(), err)
+		log.Printf("FileData.chunkedHashIsEqual hasher error: %s", err)
 		return false, err
 	}
 	//	dH := Hash256{}
 	//	sH := Hash256{}
 	// Check until EOF or a difference is found
+	// Chunked Hash uses a larger chunk size to improve speed.
 	dstReader := bufio.NewReaderSize(dstF, int(fd.synchro.chunkSize))
 	srcReader := bufio.NewReaderSize(f, int(fd.synchro.chunkSize))
 	for {
 		s, err := io.CopyN(hasher, srcReader, fd.synchro.chunkSize)
 		if err != nil && err != io.EOF {
-			log.Printf("error copying src hasher for %s: %s", fd.RootPath(), err)
+			log.Printf("FileData.chunkedHashIsEqual copy src error %s: %s", fd.RootPath(), err)
 			return false, err
 		}
 		d, err := io.CopyN(dstHasher, dstReader, fd.synchro.chunkSize)
 		if err != nil && err != io.EOF {
-			log.Printf("error copying dst hasher for %s: %s", dstFd.RootPath(), err)
+			log.Printf("FileData.chunkedHashIsEqual copy src error %s: %s", dstFd.RootPath(), err)
 			return false, err
 		}
 		if d != s { // if the bytes copied were different, return false
@@ -278,24 +230,6 @@ func (fd *FileData) isEqualMixed(chunks int, f *os.File, hasher hash.Hash, dstFd
 	return true, nil
 }
 
-// isEqualCached is called when the file fits within the maxChunks.
-func (fd *FileData) isEqualCached(chunks int, f *os.File, hasher hash.Hash, dstFd *FileData) (bool, error) {
-	h := Hash256{}
-	for i := 0; i < chunks; i++ {
-		_, err := io.CopyN(hasher, f, fd.synchro.chunkSize)
-		if err != nil {
-			log.Printf("error copying hasher for precalculated digest comparison %s: %s", fd.String(), err)
-			return false, err
-		}
-		copy(h[:], hasher.Sum(nil))
-		if Hash256(h) != dstFd.Digests[i] {
-			return false, nil
-		}
-	}
-	return true, nil
-}
-*/
-
 // RelPath returns the relative path of the file, this is the file less the
 // root information. This allows for easy comparision between two directories.
 func (fd *FileData) RelPath() string {
@@ -307,6 +241,11 @@ func (fd *FileData) RelPath() string {
 // directories being synched. This is not the FullPath of a file.
 func (fd *FileData) RootPath() string {
 	return filepath.Join(fd.Root, fd.Dir, fd.Fi.Name())
+}
+
+func (fd *FileData) FullPath() string {
+	fullroot, _ := filepath.Abs(fd.RootPath())
+	return fullroot
 }
 
 // FileDatas is used for sorting FileData info
