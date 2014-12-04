@@ -1,6 +1,8 @@
 synchronicity
 =============
 
+**Refactor in process, do not use**
+
 A flexible sync package for concurrently inventorying and syncing two directories allowing for idempotent pushes of sources to destinations; among other things.
 
 Synchronicity is usable right away, with no additional configuration. It can be used using its internal Synchro struct or it can return a `synchronicity.Synchro` struct for you to use directly. Both can be configured to better suit the environment within which it will be running, but that's optional.
